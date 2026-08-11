@@ -106,7 +106,11 @@ function scrubBacktickNoise(text: string): string {
     protectedRanges.push({ end: balancedFenceRe.lastIndex, start })
   }
 
-  const danglingCodeFenceRe = /(^|\n)[ \t]*(`{3,}|~{3,})([a-z0-9][a-z0-9+#-]{0,15})[ \t]*\n([\s\S]*)$/gi
+  // The info string is optional. A bare ``` opener is the common shape while a
+  // reply is still streaming, and requiring a language tag here left it out of
+  // protectedRanges — so the fenceNoiseRe pass below deleted the opening fence
+  // and the body rendered as loose prose until the closing fence arrived.
+  const danglingCodeFenceRe = /(^|\n)[ \t]*(`{3,}|~{3,})([a-z0-9][a-z0-9+#-]{0,15})?[ \t]*\n([\s\S]*)$/gi
 
   while ((match = danglingCodeFenceRe.exec(text)) !== null) {
     const start = match.index + match[1].length
@@ -114,7 +118,21 @@ function scrubBacktickNoise(text: string): string {
     const info = match[3] || ''
     const body = match[4] || ''
 
-    if (!hasCloseFenceLine(body, marker) && sanitizeLanguageTag(info) && !isLikelyProseFence(info, body)) {
+    // Now that the info string is optional, a balanced block's own CLOSING
+    // fence matches this pattern too. Protecting from there to the end would
+    // shield everything after the block from backtick scrubbing, so skip any
+    // match the balanced pass already covers.
+    if (protectedRanges.some(range => start >= range.start && start < range.end)) {
+      continue
+    }
+
+    const infoValid = !info || Boolean(sanitizeLanguageTag(info))
+    // The prose check only applies to the tagged form. An untagged streaming
+    // fence has a truncated body, and a truncated body legitimately reads as
+    // prose (its code signals haven't arrived yet), so the heuristic misfires.
+    const looksLikeProse = Boolean(info) && isLikelyProseFence(info, body)
+
+    if (!hasCloseFenceLine(body, marker) && infoValid && !looksLikeProse) {
       protectedRanges.push({ end: text.length, start })
 
       break
@@ -573,7 +591,12 @@ function normalizeFenceBlocks(text: string): string {
         continue
       }
 
-      if (isLikelyProseFence(infoRaw, body)) {
+      // Untagged fences skip the prose check while the block is still open:
+      // the body is truncated mid-stream, so the heuristic flips it to prose
+      // on one chunk and back to code on the next as code signals arrive. A
+      // fence defaults to code; the closed-block path below still reclassifies
+      // it once the whole body is in.
+      if (infoRaw && isLikelyProseFence(infoRaw, body)) {
         pushProseFence(out, indent, infoRaw, bodyLines)
       } else if (isMathFence(language)) {
         // Streaming math fence — rewrite the language tag to "math".
@@ -623,6 +646,34 @@ function normalizeFenceBlocks(text: string): string {
   return out.join('\n')
 }
 
+/**
+ * Split a segment at a fence opener that has no closing fence.
+ *
+ * CODE_FENCE_SPLIT_RE only isolates BALANCED fences, so a fence that is still
+ * streaming stays inside a prose segment — where normalizeVisibleProse's
+ * stray-backtick scrub deletes its opening marker and the body renders as
+ * loose prose until the closing fence lands. Returns the two halves such that
+ * `prose + fence === part`.
+ */
+function splitTrailingOpenFence(part: string): { fence: string; prose: string } {
+  const lines = part.split('\n')
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = (lines[index] || '').match(FENCE_LINE_RE)
+
+    if (!match || hasCloseFenceLine(lines.slice(index + 1).join('\n'), match[2] || '```')) {
+      continue
+    }
+
+    return {
+      fence: lines.slice(index).join('\n'),
+      prose: index > 0 ? `${lines.slice(0, index).join('\n')}\n` : ''
+    }
+  }
+
+  return { fence: '', prose: part }
+}
+
 export function preprocessMarkdown(text: string): string {
   const cleaned = text.replace(REASONING_BLOCK_RE, '').replace(PREVIEW_MARKER_RE, '')
   const scrubbed = scrubBacktickNoise(cleaned)
@@ -652,16 +703,24 @@ export function preprocessMarkdown(text: string): string {
       // the benefit of its other (single-segment) callers; here we're
       // operating on a SEGMENT of a larger document where outer
       // whitespace is structural and must survive.
-      const leading = part.match(/^\s*/)?.[0] ?? ''
-      const trailing = part.match(/\s*$/)?.[0] ?? ''
+      // A still-streaming fence sits inside this prose segment; hold it aside
+      // so the prose transforms below can't strip its opening marker.
+      const { fence, prose } = splitTrailingOpenFence(part)
+
+      if (!prose.trim()) {
+        return part
+      }
+
+      const leading = prose.match(/^\s*/)?.[0] ?? ''
+      const trailing = prose.match(/\s*$/)?.[0] ?? ''
 
       // Run only on prose segments so `$5` literals and `\(` inside code
       // blocks stay intact. The HTML-depth clamp belongs here for the same
       // reason: a fenced block renders as code and never reaches rehype-raw,
       // so escaping tags inside one would corrupt the listing for nothing.
-      const transformed = clampHtmlNestingDepth(normalizeVisibleProse(stripPreviewTargets(normalizeProseMath(part))))
+      const transformed = clampHtmlNestingDepth(normalizeVisibleProse(stripPreviewTargets(normalizeProseMath(prose))))
 
-      return leading + transformed + trailing
+      return leading + transformed + trailing + fence
     })
     .join('')
     .replace(/[ \t]+\n/g, '\n')

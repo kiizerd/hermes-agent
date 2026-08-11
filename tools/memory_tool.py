@@ -169,6 +169,11 @@ class MemoryStore:
         self.user_char_limit = user_char_limit
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        # (mtime_ns, size) per memory file as of the last load/save WE did.
+        # Used by reload_if_changed_on_disk() to tell a FOREIGN write (another
+        # session, a cron job, an MCP subprocess, a hand edit) apart from our
+        # own -- see that method for why only foreign writes force a reload.
+        self._disk_signature: Dict[str, Any] = {}
         # Per-turn counter of failed at-capacity consolidation attempts; reset
         # at each turn boundary by reset_consolidation_failures() (#42405).
         self._consolidation_failures = 0
@@ -219,6 +224,14 @@ class MemoryStore:
         """
         mem_dir = get_memory_dir()
         mem_dir.mkdir(parents=True, exist_ok=True)
+
+        # Stamp BEFORE reading, not after. If a foreign writer lands between
+        # the stat and the read we record the OLDER signature, so the next
+        # turn sees a mismatch and reloads again -- a redundant reload, never
+        # a missed one. Stamping after the read inverts that into silently
+        # recording a signature for bytes we never actually loaded.
+        self._stamp_signature("memory")
+        self._stamp_signature("user")
 
         self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
         self.user_entries = self._read_file(mem_dir / "USER.md")
@@ -319,6 +332,61 @@ class MemoryStore:
             return mem_dir / "USER.md"
         return mem_dir / "MEMORY.md"
 
+    def _current_signature(self, target: str) -> Any:
+        """Return ``(mtime_ns, size)`` for *target*'s file, or None if absent.
+
+        A stat failure is reported as None, same as a missing file: an
+        unreadable file is not evidence that the loaded snapshot is still
+        valid, and None never compares equal to a real signature, so the
+        comparison falls to the safe side (reload).
+        """
+        try:
+            st = self._path_for(target).stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _stamp_signature(self, target: str) -> None:
+        """Record *target*'s current on-disk signature as ours."""
+        self._disk_signature[target] = self._current_signature(target)
+
+    def reload_if_changed_on_disk(self) -> bool:
+        """Reload from disk when a FOREIGN writer changed the memory files.
+
+        The system-prompt snapshot is deliberately frozen for the life of a
+        session (see ``load_from_disk``) so the cached prompt prefix stays
+        byte-stable and providers keep hitting their prefix cache. That
+        invariant assumes this process is the only writer -- which stopped
+        being true once other sessions, cron jobs, and the hermes-tools MCP
+        subprocess gained the memory tool. Their writes landed on disk while
+        this agent kept serving a stale snapshot for the rest of the session.
+
+        Our own writes stamp the signature in ``save_to_disk``, so they do NOT
+        trip this check: the existing freeze-until-compaction behaviour for
+        self-writes is preserved exactly, and the prefix cache is only ever
+        given up for a change this process could not otherwise have seen.
+
+        Returns True when a reload happened, so the caller can invalidate the
+        cached system prompt. Never raises -- memory freshness must not be
+        able to break a turn.
+        """
+        try:
+            changed = [
+                t for t in ("memory", "user")
+                if self._current_signature(t) != self._disk_signature.get(t)
+            ]
+            if not changed:
+                return False
+            self.load_from_disk()
+            logger.info(
+                "Memory reloaded from disk -- external change detected in: %s",
+                ", ".join(changed),
+            )
+            return True
+        except Exception:
+            logger.debug("reload_if_changed_on_disk failed", exc_info=True)
+            return False
+
     def _reload_target(self, target: str, *, skip_drift: bool = False):
         """Re-read entries from disk into in-memory state.
 
@@ -364,6 +432,9 @@ class MemoryStore:
         """Persist entries to the appropriate file. Called after every mutation."""
         get_memory_dir().mkdir(parents=True, exist_ok=True)
         self._write_file(self._path_for(target), self._entries_for(target))
+        # Claim the bytes we just wrote so reload_if_changed_on_disk() does
+        # not read our own mutation back as a foreign one.
+        self._stamp_signature(target)
 
     def _entries_for(self, target: str) -> List[str]:
         if target == "user":

@@ -25,6 +25,7 @@ move-and-name refactor with no semantic change.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import uuid
@@ -584,6 +585,17 @@ def build_turn_context(
     _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
     if callable(_reset_consol):
         _reset_consol()
+    # Pick up memory written by anyone other than this process (a sister
+    # session, a cron job, the hermes-tools MCP subprocess, a hand edit).
+    # Only foreign writes reach here -- our own stamp their signature on save
+    # -- so the prefix cache is given up only for a change we could not
+    # otherwise see, and only at a turn boundary where the prompt is rebuilt
+    # anyway. Opt out with HERMES_MEMORY_DISK_SYNC=off.
+    if os.getenv("HERMES_MEMORY_DISK_SYNC", "").strip().lower() not in ("off", "0", "false"):
+        _reload_mem = getattr(agent._memory_store, "reload_if_changed_on_disk", None)
+        if callable(_reload_mem) and _reload_mem():
+            from agent.system_prompt import invalidate_system_prompt
+            invalidate_system_prompt(agent)
     agent._vision_supported = True
 
     # Pre-turn connection health check: clean up dead TCP connections.

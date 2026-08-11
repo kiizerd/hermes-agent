@@ -93,7 +93,7 @@ class TestProviderLabel:
         assert provider_label("kimi") == "Kimi / Kimi Coding Plan"
         assert provider_label("stepfun") == "StepFun Step Plan"
         assert provider_label("copilot") == "GitHub Copilot"
-        assert provider_label("copilot-acp") == "GitHub Copilot ACP"
+        assert provider_label("copilot-acp") == "Claude Sub ACP"
         assert provider_label("auto") == "Auto"
 
 

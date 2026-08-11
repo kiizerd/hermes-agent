@@ -338,7 +338,19 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "openai-codex": _codex_curated_models(),
     "xai-oauth": _xai_curated_models(),
     "copilot-acp": [
-        "copilot-acp",
+        # This provider spawns whatever HERMES_COPILOT_ACP_COMMAND points at.
+        # Locally that is claude-agent-acp, so these are the aliases IT accepts
+        # (probed from a live session/new configOptions response). The client
+        # negotiates the choice via session/set_config_option.
+        "opus",
+        "sonnet",
+        "haiku",
+        "claude-fable-5[1m]",
+        # Raw API ids are NOT advertised in configOptions, so
+        # session/set_config_option rejects them. They reach the model through
+        # the session/new _meta.claudeCode.options.model passthrough instead,
+        # which the SDK applies directly -- verified against a live agent.
+        "claude-opus-4-8",
     ],
     "copilot": [
         "gpt-5.4",
@@ -1169,7 +1181,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("tencent-tokenhub", "Tencent TokenHub",       "Tencent TokenHub (Hy3 Preview via tokenhub.tencentmaas.com)"),
     ProviderEntry("nvidia",         "NVIDIA NIM",               "NVIDIA NIM (Nemotron models via build.nvidia.com or local NIM)"),
     ProviderEntry("copilot",        "GitHub Copilot",           "GitHub Copilot (Uses GITHUB_TOKEN or gh auth token)"),
-    ProviderEntry("copilot-acp",    "GitHub Copilot ACP",       "GitHub Copilot ACP (Spawns copilot --acp --stdio)"),
+    ProviderEntry("copilot-acp",    "Claude Sub ACP",       "Claude Sub ACP (Spawns HERMES_COPILOT_ACP_COMMAND)"),
     ProviderEntry("huggingface",    "Hugging Face",             "Hugging Face Inference Providers"),
     ProviderEntry("gemini",         "Google AI Studio",         "Google AI Studio (Native Gemini API)"),
     ProviderEntry("vertex",         "Google Vertex AI",         "Google Vertex AI (Gemini via GCP; OAuth2 service account or ADC, GCP billing/quotas)"),
@@ -3220,6 +3232,33 @@ def curated_models_for_provider(
     return [(m, "") for m in models]
 
 
+def _copilot_acp_is_rerouted() -> bool:
+    """True when the copilot-acp provider has been pointed at a non-Copilot agent.
+
+    The desktop backend does not always have ``.env`` loaded into ``os.environ``
+    at model-catalog time, so fall back to reading the file directly.
+    """
+    if os.environ.get("HERMES_COPILOT_ACP_COMMAND"):
+        return True
+    try:
+        home = os.environ.get("HERMES_HOME") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local", "hermes"
+        )
+        env_path = Path(home) / ".env"
+        if not env_path.is_file():
+            return False
+        for raw in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            if key.strip() == "HERMES_COPILOT_ACP_COMMAND":
+                return bool(value.strip().strip("'\""))
+    except Exception:
+        pass
+    return False
+
+
 def _provider_keys(provider: str) -> set[str]:
     key = (provider or "").strip().lower()
     normalized = normalize_provider(provider)
@@ -3842,6 +3881,13 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             access_token = None
         return get_codex_model_ids(access_token=access_token)
     if normalized in {"copilot", "copilot-acp"}:
+        # copilot-acp spawns whatever HERMES_COPILOT_ACP_COMMAND points at, so
+        # GitHub's /models list does not describe it. When the command has been
+        # re-routed (e.g. to claude-agent-acp), prefer the local static catalog.
+        if normalized == "copilot-acp":
+            static = list(_PROVIDER_MODELS.get("copilot-acp", []))
+            if static and _copilot_acp_is_rerouted():
+                return static
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())
             if live:

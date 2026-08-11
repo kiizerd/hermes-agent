@@ -32,7 +32,13 @@ class CopilotACPClientSafetyTests(unittest.TestCase):
             "</tool_call>"
         )
 
-        with patch.object(self.client, "_run_prompt", return_value=(tool_response, "")):
+        # Scraping <tool_call> out of the reply text IS bridge behaviour, so
+        # pin the mode. Left unset, _resolve_command() falls back to whatever
+        # HERMES_COPILOT_ACP_COMMAND says, and on a machine where that points
+        # at a native agent this test takes the native streaming path and
+        # spawns a real subprocess instead of using the patched _run_prompt.
+        with patch.dict(os.environ, {"HERMES_ACP_TOOL_MODE": "bridge"}), \
+                patch.object(self.client, "_run_prompt", return_value=(tool_response, "")):
             stream = self.client._create_chat_completion(
                 model="copilot-acp",
                 messages=[{"role": "user", "content": "read README.md"}],
@@ -240,6 +246,92 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
 
     assert "env" in captured["kwargs"]
     assert captured["kwargs"]["env"]["HOME"]
+
+
+# ── hermes-tools MCP exposure (option A′) ───────────────────────────
+
+
+def _make_native_client(tmp_path, command="claude-agent-acp", args=None):
+    return CopilotACPClient(
+        api_key="copilot-acp",
+        base_url="acp://copilot",
+        acp_command=command,
+        acp_args=args if args is not None else [],
+        acp_cwd=str(tmp_path),
+    )
+
+
+def test_hermes_tools_entry_is_stdio_shaped(monkeypatch, tmp_path):
+    """acp-agent.js treats an entry as stdio ONLY when no "type" key is
+    present; adding one silently routes it down the http/sse branch and the
+    server never starts."""
+    monkeypatch.delenv("HERMES_ACP_HERMES_TOOLS", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_ID", "sess-1")
+
+    entries = _make_native_client(tmp_path)._hermes_tools_mcp_servers()
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert "type" not in entry
+    assert entry["name"] == "hermes-tools"
+    assert entry["args"] == ["-m", "agent.transports.hermes_tools_mcp_server"]
+
+    env = {e["name"]: e["value"] for e in entry["env"]}
+    # PYTHONPATH, not cwd: cwd is the user's working directory, so `-m` would
+    # not resolve the Hermes package without it.
+    assert env["PYTHONPATH"].endswith("hermes-agent") or env["PYTHONPATH"]
+    assert env["PYTHONIOENCODING"] == "utf-8"
+    assert env["HERMES_SESSION_ID"] == "sess-1"
+
+
+def test_hermes_tools_skipped_in_bridge_mode(monkeypatch, tmp_path):
+    """Bridge mode already injects Hermes' catalog into the prompt and runs
+    the calls itself; a second copy over MCP would be duplicate tools."""
+    monkeypatch.delenv("HERMES_ACP_HERMES_TOOLS", raising=False)
+    client = _make_native_client(tmp_path, command="copilot", args=["--acp", "--stdio"])
+    assert client._hermes_tools_mcp_servers() == []
+
+
+def test_hermes_tools_opt_out(monkeypatch, tmp_path):
+    client = _make_native_client(tmp_path)
+    for value in ("off", "0", "false", "none"):
+        monkeypatch.setenv("HERMES_ACP_HERMES_TOOLS", value)
+        assert client._hermes_tools_mcp_servers() == []
+
+
+def test_hermes_tools_omits_absent_optional_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_ACP_HERMES_TOOLS", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+
+    entry = _make_native_client(tmp_path)._hermes_tools_mcp_servers()[0]
+    names = {e["name"] for e in entry["env"]}
+
+    # Passing an empty value would override a real one the launcher set.
+    assert "HERMES_SESSION_ID" not in names
+    assert "HERMES_HOME" not in names
+
+
+def test_session_reuse_requires_matching_hermes_session(monkeypatch, tmp_path):
+    """The hermes-tools subprocess gets HERMES_SESSION_ID baked in at
+    session/new. An ACP session outlives a Hermes chat, so reuse across a
+    session change would leave cross-session recall filtering against a
+    session the user already left."""
+    from agent.copilot_acp_client import _current_hermes_session_id
+
+    client = _make_native_client(tmp_path)
+    client._session_id = "acp-1"
+    client._session_model = "opus"
+
+    monkeypatch.setenv("HERMES_SESSION_ID", "sess-A")
+    client._session_hermes_id = _current_hermes_session_id()
+
+    with _patch.object(client, "_session_is_live", return_value=True):
+        assert client._session_hermes_id == _current_hermes_session_id()
+
+        monkeypatch.setenv("HERMES_SESSION_ID", "sess-B")
+        assert client._session_hermes_id != _current_hermes_session_id()
 
 
 # ── --acp support probe tests (PR #87308 / issue #87309) ────────────

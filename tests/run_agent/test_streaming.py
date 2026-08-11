@@ -1380,66 +1380,82 @@ def _make_acp_agent(provider="copilot-acp", base_url="acp://copilot"):
     return agent
 
 
-class TestCopilotACPStreamingDecision:
-    """Verify that copilot-acp routes to the non-streaming path.
+def _acp_use_streaming(agent) -> bool:
+    """Mirror of the streaming decision in conversation_loop for ACP runtimes.
 
-    CopilotACPClient communicates via subprocess stdio and returns a plain
-    SimpleNamespace — not an iterable stream.  The streaming decision logic
-    must detect ACP runtimes and route to _interruptible_api_call instead.
+    Kept in lockstep with the ``_use_streaming`` ladder there; the loop body it
+    lives in is not callable in isolation.
+    """
+    if getattr(agent, "_disable_streaming", False):
+        return False
+    if str(getattr(agent, "base_url", "") or "").lower().startswith("acp+tcp://"):
+        return False
+    return True
+
+
+class TestCopilotACPStreamingDecision:
+    """Verify that the subprocess ACP client takes the streaming path.
+
+    CopilotACPClient yields OpenAI-style chunks as the remote agent produces
+    them, so it belongs on the streaming path. That is not cosmetic: the
+    non-streaming path suppresses ``reasoning_callback`` whenever stream
+    consumers are registered (see ``build_assistant_message``), on the
+    assumption that streaming already displayed the reasoning — so routing ACP
+    around streaming left the reasoning display permanently empty.
+
+    ACP over TCP is not served by CopilotACPClient and has no stream shape, so
+    it stays excluded.
     """
 
     @patch("run_agent.get_tool_definitions", return_value=[])
     @patch("run_agent.check_toolset_requirements", return_value={})
     @patch("agent.copilot_acp_client.CopilotACPClient")
-    def test_provider_name_triggers_non_streaming(
+    def test_provider_name_allows_streaming(
         self, mock_acp_cls, _mock_check, _mock_tools
     ):
-        """provider='copilot-acp' → non-streaming path."""
+        """provider='copilot-acp' → streaming path."""
         mock_acp_cls.return_value = MagicMock()
         agent = _make_acp_agent(provider="copilot-acp", base_url="acp://copilot")
 
-        with (
-            patch.object(agent, "_interruptible_api_call",
-                         return_value=_valid_acp_response()) as mock_non_stream,
-            patch.object(agent, "_interruptible_streaming_api_call") as mock_stream,
-        ):
-            # Verify the decision logic correctly disables streaming
-            _use_streaming = True
-            if getattr(agent, "_disable_streaming", False):
-                _use_streaming = False
-            elif (
-                agent.provider == "copilot-acp"
-                or str(agent.base_url or "").lower().startswith("acp://copilot")
-                or str(agent.base_url or "").lower().startswith("acp+tcp://")
-            ):
-                _use_streaming = False
-
-            assert _use_streaming is False
-            # Call the non-streaming path as the loop would
-            response = mock_non_stream({})
-            mock_stream.assert_not_called()
+        assert _acp_use_streaming(agent) is True
 
     @patch("run_agent.get_tool_definitions", return_value=[])
     @patch("run_agent.check_toolset_requirements", return_value={})
     @patch("agent.copilot_acp_client.CopilotACPClient")
-    def test_acp_base_url_triggers_non_streaming(
+    def test_acp_base_url_allows_streaming(
         self, mock_acp_cls, _mock_check, _mock_tools
     ):
-        """base_url='acp://copilot' → non-streaming even without provider name."""
+        """base_url='acp://copilot' → streaming even without the provider name."""
         mock_acp_cls.return_value = MagicMock()
         agent = _make_acp_agent(provider="custom", base_url="acp://copilot")
         agent.provider = "custom"
 
-        _use_streaming = True
-        if (
-            agent.provider == "copilot-acp"
-            or str(agent.base_url or "").lower().startswith("acp://copilot")
-            or str(agent.base_url or "").lower().startswith("acp+tcp://")
-        ):
-            _use_streaming = False
+        assert _acp_use_streaming(agent) is True
 
-        assert _use_streaming is False
+    @patch("run_agent.get_tool_definitions", return_value=[])
+    @patch("run_agent.check_toolset_requirements", return_value={})
+    @patch("agent.copilot_acp_client.CopilotACPClient")
+    def test_acp_tcp_base_url_triggers_non_streaming(
+        self, mock_acp_cls, _mock_check, _mock_tools
+    ):
+        """base_url='acp+tcp://…' → non-streaming; no CopilotACPClient behind it."""
+        mock_acp_cls.return_value = MagicMock()
+        agent = _make_acp_agent(provider="copilot-acp", base_url="acp+tcp://127.0.0.1:9000")
 
+        assert _acp_use_streaming(agent) is False
+
+    @patch("run_agent.get_tool_definitions", return_value=[])
+    @patch("run_agent.check_toolset_requirements", return_value={})
+    @patch("agent.copilot_acp_client.CopilotACPClient")
+    def test_disable_streaming_flag_still_wins(
+        self, mock_acp_cls, _mock_check, _mock_tools
+    ):
+        """A provider that already signalled 'stream not supported' stays off."""
+        mock_acp_cls.return_value = MagicMock()
+        agent = _make_acp_agent(provider="copilot-acp", base_url="acp://copilot")
+        agent._disable_streaming = True
+
+        assert _acp_use_streaming(agent) is False
 
     def test_non_acp_provider_allows_streaming(self):
         """Regular providers still get streaming enabled."""
@@ -1456,17 +1472,7 @@ class TestCopilotACPStreamingDecision:
         )
         agent.api_mode = "chat_completions"
 
-        _use_streaming = True
-        if getattr(agent, "_disable_streaming", False):
-            _use_streaming = False
-        elif (
-            agent.provider == "copilot-acp"
-            or str(agent.base_url or "").lower().startswith("acp://copilot")
-            or str(agent.base_url or "").lower().startswith("acp+tcp://")
-        ):
-            _use_streaming = False
-
-        assert _use_streaming is True
+        assert _acp_use_streaming(agent) is True
 
 
 class TestBedrockIamStreamingFallback:

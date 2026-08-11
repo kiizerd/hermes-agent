@@ -2489,6 +2489,10 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         from agent.copilot_acp_client import CopilotACPClient
 
         client = CopilotACPClient(**client_kwargs)
+        # A native-tool ACP agent runs its own tools, so they never reach the
+        # normal tool-card path. The client needs the agent to reach its
+        # display callbacks; the reference it stores is weak.
+        client.bind_agent(agent)
         _ra().logger.info(
             "Copilot ACP client created (%s, shared=%s) %s",
             reason,

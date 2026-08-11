@@ -2959,6 +2959,16 @@ def list_authenticated_providers(
                 has_creds = has_vertex_credentials()
             except Exception as exc:
                 logger.debug("Vertex credential check failed: %s", exc)
+        elif overlay.auth_type == "external_process":
+            # Credentials live inside the spawned process (the ACP wrapper
+            # injects its own token), so there is nothing to detect here.
+            # Treat the provider as available when a launch command is
+            # configured, otherwise it is silently hidden from the picker.
+            try:
+                from hermes_cli.models import _copilot_acp_is_rerouted
+                has_creds = _copilot_acp_is_rerouted()
+            except Exception as exc:
+                logger.debug("external_process credential check failed: %s", exc)
         elif overlay.extra_env_vars:
             has_creds = any(os.environ.get(ev) for ev in overlay.extra_env_vars)
         # Also check api_key_env_vars from PROVIDER_REGISTRY for api_key auth_type

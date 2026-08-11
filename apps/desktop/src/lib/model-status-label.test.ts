@@ -16,6 +16,27 @@ describe('model-status-label', () => {
     expect(displayModelName('anthropic/claude-haiku-4-5-20251001')).toBe('Haiku 4 5')
   })
 
+  it('renders bare Claude aliases with their version number', () => {
+    // ACP agents accept bare aliases whose ids carry no version, so the picker
+    // has to supply one or the entry reads as a meaningless "Opus".
+    expect(displayModelName('opus')).toBe('Opus 5')
+    expect(displayModelName('sonnet')).toBe('Sonnet 5')
+    expect(displayModelName('haiku')).toBe('Haiku 4.5')
+    expect(displayModelName('claude-fable-5[1m]')).toBe('Fable 5')
+  })
+
+  it('renders dash-versioned Anthropic ids with a dotted version', () => {
+    // The raw API id reaches the model through the ACP _meta passthrough, so it
+    // shows up in the picker verbatim and would otherwise read "Opus 4 8".
+    expect(displayModelName('claude-opus-4-8')).toBe('Opus 4.8')
+  })
+
+  it('leaves versioned Claude ids alone', () => {
+    // The alias map must not shadow ids that already state their version.
+    expect(displayModelName('claude-sonnet-4.6')).toBe('Sonnet 4.6')
+    expect(displayModelName('anthropic/claude-opus-4.8-fast')).toBe('Opus 4.8')
+  })
+
   it('maps reasoning effort to compact labels', () => {
     expect(reasoningEffortLabel('high')).toBe('High')
     expect(reasoningEffortLabel('xhigh')).toBe('XHigh')

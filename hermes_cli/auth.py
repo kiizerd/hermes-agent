@@ -300,7 +300,7 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
     ),
     "copilot-acp": ProviderConfig(
         id="copilot-acp",
-        name="GitHub Copilot ACP",
+        name="Claude Sub ACP",
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",

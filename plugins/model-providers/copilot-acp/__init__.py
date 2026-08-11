@@ -1,4 +1,4 @@
-"""GitHub Copilot ACP provider profile.
+"""Claude Sub ACP provider profile.
 
 copilot-acp uses an external ACP subprocess — NOT the standard
 transport. api_mode="copilot_acp" is handled separately in run_agent.py.
@@ -10,7 +10,7 @@ from providers.base import ProviderProfile
 
 
 class CopilotACPProfile(ProviderProfile):
-    """GitHub Copilot ACP — external process, no REST models endpoint."""
+    """Claude Sub ACP — external process, no REST models endpoint."""
 
     def fetch_models(
         self,

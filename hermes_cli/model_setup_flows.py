@@ -1997,7 +1997,7 @@ def _model_flow_copilot(config, current_model=""):
         print("No change.")
 
 def _model_flow_copilot_acp(config, current_model=""):
-    """GitHub Copilot ACP flow using the local Copilot CLI."""
+    """Claude Sub ACP flow using the local Copilot CLI."""
     from hermes_cli.auth import (
         PROVIDER_REGISTRY,
         _prompt_model_selection,
@@ -2025,9 +2025,9 @@ def _model_flow_copilot_acp(config, current_model=""):
     )
     effective_base = status.get("base_url") or pconfig.inference_base_url
 
-    print("  GitHub Copilot ACP delegates Hermes turns to `copilot --acp`.")
+    print("  Claude Sub ACP delegates a Hermes turn to the local ACP agent process.")
     print("  Hermes currently starts its own ACP subprocess for each request.")
-    print("  Hermes uses your selected model as a hint for the Copilot ACP session.")
+    print("  Hermes uses your selected model as a hint for the ACP session.")
     print(f"  Command: {resolved_command}")
     print(f"  Backend marker: {effective_base}")
     print()

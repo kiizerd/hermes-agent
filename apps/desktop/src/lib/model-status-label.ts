@@ -53,7 +53,31 @@ const VARIANT_TAGS: ReadonlyArray<readonly [RegExp, string]> = [
 
 const titleCase = (text: string): string => text.replace(/\b\w/g, char => char.toUpperCase()).trim()
 
+// Bare Claude aliases (as accepted by ACP agents such as claude-agent-acp)
+// carry no version in the id, so `opus` would render as a bare "Opus". Map them
+// to the marketing name the agent itself reports, so the picker matches what
+// Anthropic calls the model. Update when Anthropic ships a new generation.
+// `claude-fable-5[1m]` is not listed: it already states its version and is
+// handled by the generic claude- path once the `[1m]` suffix is stripped.
+// Raw Anthropic API ids spell the version with dashes (`claude-opus-4-8`), which
+// the generic claude- path renders as "Opus 4 8". Listed here rather than fixed
+// by a general dash-to-dot rule, since that rule cannot tell a version tail from
+// a name (`claude-fable-5` is one word plus one version, `claude-3-5-sonnet` is
+// not) and would rewrite every other provider's ids too.
+const CLAUDE_ALIAS_NAMES: Readonly<Record<string, string>> = {
+  opus: 'Opus 5',
+  sonnet: 'Sonnet 5',
+  haiku: 'Haiku 4.5',
+  'claude-opus-4-8': 'Opus 4.8'
+}
+
 function prettifyBase(base: string): string {
+  const alias = CLAUDE_ALIAS_NAMES[base.toLowerCase()]
+
+  if (alias) {
+    return alias
+  }
+
   if (/^claude-/i.test(base)) {
     return titleCase(base.replace(/^claude-/i, '').replace(/-/g, ' '))
   }
@@ -86,6 +110,10 @@ export function modelDisplayParts(model: string): { name: string; tag: string } 
 
   // Drop a trailing date-pin (`…-20251101`) — snapshot noise, not a name.
   base = base.replace(/-\d{8}$/, '')
+
+  // Drop a trailing context-window suffix (`claude-fable-5[1m]`) — a capability
+  // marker on the id, not part of the model's name.
+  base = base.replace(/\[[^\]]*\]$/, '')
 
   return { name: prettifyBase(base) || model.trim() || 'No model', tag }
 }

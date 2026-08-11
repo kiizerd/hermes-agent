@@ -20,6 +20,10 @@ Scope (what we expose):
   - image_generate                       — image generation
   - skill_view, skills_list              — Hermes' skill library
   - text_to_speech                       — TTS
+  - memory, session_search               — persistent memory + cross-session
+                                           recall. Dispatched through
+                                           _AGENT_LOOP_DISPATCH below, not
+                                           handle_function_call.
   - kanban_* (complete/block/comment/    — kanban worker + orchestrator
     heartbeat/show/list/create/            handoff (stateless: read env var,
     unblock/link)                          write ~/.hermes/kanban.db)
@@ -29,13 +33,22 @@ What we DO NOT expose:
   - read_file / write_file / patch       — codex's apply_patch + shell
   - search_files / process               — codex's shell
   - clarify                              — codex's own UX
-  - delegate_task / memory /             — `_AGENT_LOOP_TOOLS` in Hermes
-    session_search / todo                  (model_tools.py). They require
-                                           the running AIAgent context to
-                                           dispatch (mid-loop state), so a
-                                           stateless MCP callback can't
-                                           drive them. See the inline
-                                           comment on EXPOSED_TOOLS below.
+  - delegate_task / todo                 — `_AGENT_LOOP_TOOLS` in Hermes
+                                           (model_tools.py) whose backing
+                                           state genuinely lives on the
+                                           agent: `agent._todo_store`, and
+                                           subagent spawning off the live
+                                           loop. A stateless callback can't
+                                           supply either.
+
+`memory` and `session_search` are also `_AGENT_LOOP_TOOLS`, but only their
+*dispatch* needs the agent — the state behind them is on disk.
+`MemoryStore(...).load_from_disk()` and `SessionDB()` are both constructible
+standalone (run_agent.py:600 opens a SessionDB exactly this way when a
+frontend forgot to pass one), so this server builds them per call rather
+than reaching for an agent. Constructing per call is also what keeps writes
+coherent: nothing here holds a long-lived in-memory copy that a concurrent
+Hermes session could make stale.
 
 Run with: python -m agent.transports.hermes_tools_mcp_server
 Spawned by: CodexAppServerSession.ensure_started() when the runtime is
@@ -127,6 +140,13 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "skill_view",
     "skills_list",
     "text_to_speech",
+    # Agent-loop tools with disk-backed state. handle_function_call refuses
+    # these by name (model_tools.py `_AGENT_LOOP_TOOLS`), so they dispatch
+    # through _AGENT_LOOP_DISPATCH instead. Registration is still gated by
+    # get_tool_definitions() below: when the memory toolset is disabled in
+    # config, `memory` never appears in the schema list and is skipped.
+    "memory",
+    "session_search",
     # Kanban worker handoff tools — gated on HERMES_KANBAN_TASK env var
     # (set by the kanban dispatcher when spawning a worker). Without these
     # in the callback, a worker spawned with openai_runtime=codex_app_server
@@ -151,6 +171,86 @@ EXPOSED_TOOLS: tuple[str, ...] = (
 )
 
 
+def _dispatch_memory(args: dict[str, Any]) -> str:
+    """Run the memory tool against a freshly loaded disk store.
+
+    The store is built per call on purpose. A long-lived instance here would
+    drift from disk whenever another Hermes session wrote memory, and the
+    write path (MemoryStore.save_to_disk, called by the tool itself) would
+    then persist a stale snapshot over it.
+    """
+    from tools.memory_tool import MemoryStore, memory_tool
+
+    mem_cfg: dict = {}
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        section = (load_config_readonly() or {}).get("memory")
+        if isinstance(section, dict):
+            mem_cfg = section
+    except Exception:
+        logger.debug("memory: config load failed, using defaults", exc_info=True)
+
+    store = MemoryStore(
+        memory_char_limit=mem_cfg.get("memory_char_limit", 2200),
+        user_char_limit=mem_cfg.get("user_char_limit", 1375),
+    )
+    store.load_from_disk()
+    return memory_tool(
+        action=args.get("action"),
+        target=args.get("target", "memory"),
+        content=args.get("content"),
+        old_text=args.get("old_text"),
+        operations=args.get("operations"),
+        store=store,
+    )
+
+
+def _dispatch_session_search(args: dict[str, Any]) -> str:
+    """Run cross-session recall against a read-only view of the state DB.
+
+    ``read_only=True`` matters: search never writes, and a writable handle
+    would contend with the live Hermes process for the same SQLite file --
+    including the TRUNCATE-WAL that SessionDB.close() performs on writable
+    connections.
+
+    ``current_session_id`` comes from HERMES_SESSION_ID, which the parent
+    Hermes process exports at agent init (agent_init.py:1540) and the
+    caller forwards into this subprocess's environment. Absent it, recall
+    still works; only "which of these is the current session" degrades.
+    """
+    from hermes_state import SessionDB
+    from tools.session_search_tool import session_search
+
+    db = SessionDB(read_only=True)
+    try:
+        return session_search(
+            query=args.get("query", ""),
+            role_filter=args.get("role_filter"),
+            limit=args.get("limit", 3),
+            session_id=args.get("session_id"),
+            around_message_id=args.get("around_message_id"),
+            window=args.get("window", 5),
+            sort=args.get("sort"),
+            profile=args.get("profile"),
+            db=db,
+            current_session_id=os.environ.get("HERMES_SESSION_ID") or None,
+        )
+    finally:
+        try:
+            db.close()
+        except Exception:
+            logger.debug("session_search: SessionDB.close() failed", exc_info=True)
+
+
+# Tools that model_tools.handle_function_call refuses by name because they
+# are agent-loop tools, but whose state is reachable without a live agent.
+_AGENT_LOOP_DISPATCH = {
+    "memory": _dispatch_memory,
+    "session_search": _dispatch_session_search,
+}
+
+
 def _build_server() -> Any:
     """Create the MCP server with Hermes tools attached. Lazy imports
     so the module can be imported without the mcp package installed
@@ -173,9 +273,10 @@ def _build_server() -> Any:
     mcp = MCPServer(
         "hermes-tools",
         instructions=(
-            "Hermes Agent's tool surface, exposed for use inside a Codex "
-            "session. Use these for capabilities Codex's built-in toolset "
-            "doesn't cover: web search/extract, browser automation, "
+            "Hermes Agent's tool surface, exposed for use inside a native "
+            "agent session (Codex, Claude via ACP). Use these for "
+            "capabilities the host agent's built-in toolset doesn't cover: "
+            "web search/extract, browser automation, "
             "subagent delegation, vision, image generation, persistent "
             "memory, skills, and cross-session search."
         ),
@@ -216,6 +317,9 @@ def _build_server() -> Any:
                     # Filter out None values before dispatch so unset optionals
                     # aren't forwarded to the handler.
                     args = {k: v for k, v in kwargs.items() if v is not None}
+                    override = _AGENT_LOOP_DISPATCH.get(tool_name)
+                    if override is not None:
+                        return override(args or {})
                     return handle_function_call(tool_name, args or {})
                 except Exception as exc:
                     logger.exception("tool %s raised", tool_name)

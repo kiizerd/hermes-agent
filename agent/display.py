@@ -575,7 +575,19 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
 
     key = primary_args.get(tool_name)
     if not key:
-        for fallback_key in ("query", "text", "command", "path", "name", "prompt", "code", "goal"):
+        # Only reached by tools with no ``primary_args`` entry — MCP, plugin and
+        # native-agent tools (an ACP agent runs its own Read/Bash/Grep and
+        # reports them under their own names). Order matters where a tool
+        # supplies several of these: ``pattern`` precedes ``path`` because a
+        # search tool given both is better previewed by what it looks for than
+        # by the directory it looks in, and ``description`` precedes ``prompt``
+        # because a subagent call's description is a short label while its
+        # prompt is the whole task text.
+        for fallback_key in (
+            "query", "text", "command", "pattern", "file_path",
+            "notebook_path", "path", "url", "skill", "name",
+            "description", "prompt", "code", "goal",
+        ):
             if fallback_key in args:
                 key = fallback_key
                 break

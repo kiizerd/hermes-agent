@@ -1,4 +1,4 @@
-"""GitHub Copilot ACP provider profile.
+"""Claude Sub ACP provider profile.
 
 copilot-acp does not speak OpenAI-over-HTTP: it drives an external ACP
 subprocess over stdio. The profile therefore supplies its own client through
@@ -16,7 +16,7 @@ from providers.base import ProviderProfile
 
 
 class CopilotACPProfile(ProviderProfile):
-    """GitHub Copilot ACP — external process, no REST models endpoint."""
+    """Claude Sub ACP — external process, no REST models endpoint."""
 
     def create_client(self, **client_kwargs: Any) -> Any:
         """Build the ACP stdio shim rather than an HTTP client."""

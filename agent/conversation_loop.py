@@ -3596,16 +3596,29 @@ def run_conversation(
                 # session instead of re-failing every retry.
                 if getattr(agent, "_disable_streaming", False):
                     _use_streaming = False
-                # An ACP client communicates via subprocess stdio and returns a
-                # plain SimpleNamespace — not an iterable stream.  Keyed on the
-                # `acp://` scheme rather than one vendor, so any ACP client is
-                # excluded.  Mirror the ACP exclusion used for Responses API
-                # upgrade (lines ~1083-1085).
-                elif (
-                    agent.provider in {"copilot-acp"}
-                    or str(agent.base_url or "").lower().startswith("acp://")
-                    or str(agent.base_url or "").lower().startswith("acp+tcp://")
-                ):
+                # ACP over TCP is not served by CopilotACPClient (see
+                # create_openai_client, which routes only the copilot-acp
+                # provider and acp://copilot base URLs there), so it has no
+                # stream shape to iterate.
+                elif str(agent.base_url or "").lower().startswith("acp+tcp://"):
+                    _use_streaming = False
+                # Every other ACP client talks to a CLI over subprocess stdio
+                # and returns a plain SimpleNamespace, not an iterable stream.
+                # Keyed on the `acp://` scheme rather than one vendor, so the
+                # next ACP client inherits the exclusion — mirroring the
+                # Responses API exclusion in agent_init (lines ~829-831).
+                #
+                # copilot-acp is carved out because its client *does* stream:
+                # it yields OpenAI-style chunks as the remote agent produces
+                # them. That matters beyond live text — non-streaming
+                # suppresses reasoning_callback whenever stream consumers are
+                # registered (see build_assistant_message), on the assumption
+                # that streaming already displayed it. Excluded here, nothing
+                # ever did, and the desktop Thought pane stayed empty for every
+                # ACP turn.
+                elif agent.provider != "copilot-acp" and str(
+                    agent.base_url or ""
+                ).lower().startswith("acp://"):
                     _use_streaming = False
                 # MoA streams only when a display/TTS consumer is present to
                 # receive the deltas. MoAChatCompletions.create() honors

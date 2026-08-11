@@ -135,10 +135,15 @@ def agent_env():
     os.environ["HERMES_HOME"] = os.path.join(test_home, ".hermes")
 
     # Import fresh so the patched conversation_loop is exercised even when the
-    # module was imported earlier in the same worker.
+    # module was imported earlier in the same worker. The evicted entries are
+    # kept so they can be put back afterwards: without that, every later test
+    # in the worker sees re-imported module objects, and any monkeypatch that
+    # targets one of these modules by dotted path silently patches a different
+    # object than the code under test imports.
+    evicted = {}
     for mod in list(sys.modules):
         if mod == "run_agent" or mod.startswith("agent.") or mod.startswith("tools.") or mod.startswith("hermes_"):
-            del sys.modules[mod]
+            evicted[mod] = sys.modules.pop(mod)
     from run_agent import AIAgent
 
     agent = AIAgent(
@@ -154,6 +159,16 @@ def agent_env():
         yield agent, _MockHandler
     finally:
         srv.shutdown()
+        # Restore the modules this fixture evicted. Without it, later tests in
+        # the same worker re-import these packages and a monkeypatch by dotted
+        # path lands on a different object than the code under test holds.
+        # tools.* is deliberately excluded: those modules cache import-time
+        # state that other suites monkeypatch directly, so putting this
+        # fixture'''s stale copies back breaks them instead.
+        sys.modules.update({
+            name: mod for name, mod in evicted.items()
+            if not name.startswith("tools.")
+        })
         shutil.rmtree(test_home, ignore_errors=True)
         if prev_home is None:
             os.environ.pop("HERMES_HOME", None)

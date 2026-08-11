@@ -2812,6 +2812,13 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # provider is unaffected.
     provider_client = _provider_supplied_client(agent, client_kwargs)
     if provider_client is not None:
+        # A native-tool ACP agent runs its own tools, so they never reach the
+        # normal tool-card path. The client needs the agent to reach its
+        # display callbacks; the reference it stores is weak. Duck-typed rather
+        # than keyed on the provider name so any profile shipping a client that
+        # wants the agent gets it, in-tree or out.
+        if hasattr(provider_client, "bind_agent"):
+            provider_client.bind_agent(agent)
         _ra().logger.info(
             "%s client created from provider profile (%s, shared=%s) %s",
             agent.provider,

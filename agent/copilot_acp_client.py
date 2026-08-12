@@ -1981,15 +1981,14 @@ class CopilotACPClient:
                 # [a]lways never matched the next, slightly different call.
                 from tools.approval import (
                     check_dangerous_command,
-                    request_tool_approval,
+                    _run_approval_gate,
                 )
 
                 tool_name = _acp_tool_name(tool_call)
-                shell_command = (
-                    _acp_shell_command(tool_call) if tool_name == "Bash" else ""
-                )
+                kind = str(tool_call.get("kind") or "").strip()
+                shell_command = _acp_shell_command(tool_call)
 
-                if shell_command:
+                if shell_command and (tool_name == "Bash" or kind == "execute"):
                     # Real shell text: the dangerous-pattern matcher applies,
                     # including the unconditional hardline floor for commands
                     # with no recovery path. Safe reads auto-approve, so
@@ -2003,13 +2002,32 @@ class CopilotACPClient:
                     # no command to pattern-match. Gate them per tool with a
                     # stable rule_key so one [a]lways covers that tool instead
                     # of only the exact call that was approved.
-                    gate_name = tool_name or (
-                        str(tool_call.get("kind") or "").strip() or "tool"
-                    )
-                    result = request_tool_approval(
-                        gate_name,
-                        description,
-                        rule_key=f"copilot-acp:{gate_name}",
+                    gate_name = tool_name or kind or "tool"
+                    # Per-path grain: fold the target (file path, url, mcp tool)
+                    # into the pattern key so [a]lways sticks to THIS target,
+                    # not the whole tool. Approving writes to C:\tmp forever
+                    # must not silently bless a later write to ~/.ssh. The
+                    # command string already carries that target via
+                    # _describe_permission_request / _raw_input_detail.
+                    target_hash = hashlib.sha256(
+                        command.encode("utf-8")
+                    ).hexdigest()[:12]
+                    result = _run_approval_gate(
+                        pattern_key=f"copilot-acp:{gate_name}:{target_hash}",
+                        description=description,
+                        display_target=command,
+                        cron_deny_message=(
+                            f"BLOCKED: Copilot tool call flagged for approval "
+                            f"({description}) but cron jobs run without a user "
+                            "present to approve it."
+                        ),
+                        autoapprove_log_prefix="Copilot ACP tool call",
+                        fail_closed_when_no_human=True,
+                        no_human_block_message=(
+                            f"BLOCKED: Copilot requested approval "
+                            f"({description}) but no interactive user or "
+                            "gateway is present to answer it."
+                        ),
                     )
                 option_id = (
                     _select_permission_option(options)

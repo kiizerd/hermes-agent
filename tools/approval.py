@@ -667,6 +667,54 @@ def _user_deny_block_result(pattern: str) -> dict:
     }
 
 
+def _match_tool_allowlist(tool_key: str) -> str | None:
+    """Return the matching ``approvals.tool_allowlist`` glob, or None.
+
+    ``approvals.tool_allowlist`` in config.yaml is a user-defined list of
+    fnmatch globs matched against a non-shell tool's STABLE provider key
+    (e.g. ``copilot-acp:skill_manage``). A match auto-approves the call with
+    no card. Unlike ``approvals.deny`` it never blocks — it only grants, so
+    it is the tool-side counterpart to ``command_allowlist``.
+
+    Why a separate list is needed: ``command_allowlist`` globs shell command
+    TEXT, but tool calls (skill_manage, memory, Edit, Write, MCP) carry no
+    command string. The ACP bridge keys them as
+    ``<provider>:<tool>:<target_hash>``, and that per-call target hash can
+    never be predicted by a static config entry, so ``command_allowlist``
+    can't reach them. Matching the hash-free ``<provider>:<tool>`` key lets
+    ``copilot-acp:skill_manage`` auto-approve regardless of target.
+
+    Match is case-insensitive. An empty/absent list is a no-op, so default
+    behaviour is unchanged.
+    """
+    if not tool_key:
+        return None
+    try:
+        allow_patterns = _get_approval_config().get("tool_allowlist") or []
+    except Exception:
+        return None
+    globs = [p.strip() for p in allow_patterns
+             if isinstance(p, str) and p.strip()]
+    if not globs:
+        return None
+    candidate = tool_key.lower().strip()
+    for pattern in globs:
+        if fnmatch.fnmatchcase(candidate, pattern.lower()):
+            return pattern
+    return None
+
+
+def is_tool_allowlisted(tool_key: str) -> bool:
+    """True when a non-shell tool key matches ``approvals.tool_allowlist``.
+
+    The per-tool permanent-approval analog for tool calls that carry no
+    shell command string to match against ``command_allowlist``. See
+    :func:`_match_tool_allowlist` for the config contract. Grant-only: this
+    never blocks, so it can only relax the tool gate, never tighten it.
+    """
+    return _match_tool_allowlist(tool_key) is not None
+
+
 def _save_blocked_payload(command: str) -> Optional[str]:
     """Persist a parser-limit-blocked command as a runnable script.
 

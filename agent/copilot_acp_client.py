@@ -874,16 +874,40 @@ def _acp_stream_chunk(
     )
 
 
-def _acp_usage_chunk(model: str) -> SimpleNamespace:
-    """Final choices-less chunk. ACP reports no token counts, so it is zeros."""
+def _acp_usage_chunk(
+    model: str, usage: dict[str, Any] | None = None
+) -> SimpleNamespace:
+    """Final choices-less chunk carrying the turn's token counts.
+
+    ``usage`` is the PromptResponse.usage dict from the session/prompt
+    result -- camelCase fields built by claude-agent-acp's sessionUsage().
+    Absent or malformed, counts degrade to zero rather than failing the
+    turn (some ACP agents genuinely report nothing).
+    """
+    raw = usage if isinstance(usage, dict) else {}
+
+    def _count(key: str) -> int:
+        value = raw.get(key)
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    cached_read = _count("cachedReadTokens")
+    # OpenAI convention: prompt_tokens INCLUDES cached tokens
+    # (prompt_tokens_details.cached_tokens is a subset of it), while the
+    # agent's inputTokens follows Anthropic's convention of excluding
+    # cache reads/writes -- fold them in so downstream accounting sees
+    # the real input-side total.
+    prompt_tokens = (
+        _count("inputTokens") + cached_read + _count("cachedWriteTokens")
+    )
+    completion_tokens = _count("outputTokens")
     return SimpleNamespace(
         choices=[],
         model=model,
         usage=SimpleNamespace(
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cached_read),
         ),
     )
 
@@ -1042,6 +1066,11 @@ class CopilotACPClient:
         # tracked to force a rebuild rather than letting cross-session recall
         # keep filtering against a session the user already left.
         self._session_hermes_id: str | None = None
+        # PromptResponse.usage from the most recent session/prompt result,
+        # camelCase per claude-agent-acp's sessionUsage(). Read by the
+        # completion builders after the turn settles; None when the agent
+        # reported nothing.
+        self._last_turn_usage: dict[str, Any] | None = None
         self._sent_fingerprint: list[str] = []
         # Owning agent, for surfacing the remote agent's own tool calls to the
         # UI. Weak on purpose: the agent holds this client as ``agent.client``,
@@ -1172,12 +1201,9 @@ class CopilotACPClient:
         else:
             tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
 
-        usage = SimpleNamespace(
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
-        )
+        usage = _acp_usage_chunk(
+            model or "copilot-acp", self._last_turn_usage
+        ).usage
         assistant_message = SimpleNamespace(
             content=cleaned_text,
             tool_calls=tool_calls,
@@ -1282,7 +1308,7 @@ class CopilotACPClient:
         # A stream that ends without a finish_reason is treated downstream as a
         # truncated response, so send one even when the turn produced no text.
         yield _acp_stream_chunk(model_name, finish_reason="stop")
-        yield _acp_usage_chunk(model_name)
+        yield _acp_usage_chunk(model_name, self._last_turn_usage)
 
     def _spawn_process(self) -> subprocess.Popen[str]:
         """Start the ACP child and attach its stdout/stderr reader threads."""
@@ -1645,7 +1671,8 @@ class CopilotACPClient:
         # ToolCall}. Scoped to this turn: ids are only unique within a prompt,
         # and the slot indices are meaningless against a different list.
         tool_lines: dict[str, dict[str, Any]] = {}
-        self._rpc(
+        self._last_turn_usage = None
+        result = self._rpc(
             "session/prompt",
             {
                 "sessionId": session_id,
@@ -1662,6 +1689,12 @@ class CopilotACPClient:
             tool_lines=tool_lines,
             emit=emit,
         )
+        # The PromptResponse carries the turn's token usage; stash it for
+        # the completion builders (zeros were hardcoded before this, so
+        # every ACP turn reported an empty context meter). Cleared above
+        # first so an error or usage-less turn can't echo stale counts.
+        usage = result.get("usage") if isinstance(result, dict) else None
+        self._last_turn_usage = usage if isinstance(usage, dict) else None
         return "".join(text_parts), "".join(reasoning_parts)
 
     def _run_prompt(

@@ -18,7 +18,11 @@ Scope (what we expose):
     _get_images / _console / _vision
   - vision_analyze                       — image inspection by vision model
   - image_generate                       — image generation
-  - skill_view, skills_list              — Hermes' skill library
+  - skill_view, skills_list,             — Hermes' skill library (read +
+    skill_manage                           write: the background skill-review
+                                           fork reaches Hermes only through
+                                           this bridge, so without the write
+                                           tool it cannot save skills)
   - text_to_speech                       — TTS
   - memory, session_search               — persistent memory + cross-session
                                            recall. Dispatched through
@@ -139,6 +143,13 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "image_generate",
     "skill_view",
     "skills_list",
+    # skill_manage: turn_finalizer.py gates background skill review on
+    # "skill_manage" in agent.valid_tool_names, and under a native ACP
+    # runtime the review fork reaches Hermes tools only through this
+    # server — memory review could write, skill review had no tool.
+    # Pure-kwargs handler (tools/skill_manager_tool.py), not in
+    # _AGENT_LOOP_TOOLS, so plain handle_function_call dispatch works.
+    "skill_manage",
     "text_to_speech",
     # Agent-loop tools with disk-backed state. handle_function_call refuses
     # these by name (model_tools.py `_AGENT_LOOP_TOOLS`), so they dispatch

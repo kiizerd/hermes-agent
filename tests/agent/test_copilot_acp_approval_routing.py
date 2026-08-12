@@ -77,10 +77,29 @@ def pinned_approval_env(monkeypatch):
         approval._session_approved.update(session)
 
 
-def run_permission(tool_call: dict, message_id: int = 42) -> dict:
+def make_client() -> CopilotACPClient:
+    """A client with only the state the message handler reads.
+
+    ``__init__`` resolves the ACP command from the environment and can spawn a
+    real agent, so it is deliberately skipped; the two attributes seeded here
+    are the ones ``_handle_server_message`` touches (the toolName cache and the
+    weakref back to the owning agent, which stays unbound so the tool-card
+    callbacks no-op).
+    """
+    client = object.__new__(CopilotACPClient)
+    client._tool_names_by_call_id = {}
+    client._agent_ref = None
+    return client
+
+
+def run_permission(
+    tool_call: dict,
+    message_id: int = 42,
+    client: CopilotACPClient | None = None,
+) -> dict:
     """One permission RPC through the real handler; returns the JSON-RPC
     response it wrote to the (fake) agent process."""
-    client = object.__new__(CopilotACPClient)  # routing reads no __init__ state
+    client = client if client is not None else make_client()
     proc = FakeProc()
     handled = client._handle_server_message(
         {
@@ -97,6 +116,27 @@ def run_permission(tool_call: dict, message_id: int = 42) -> dict:
     )
     assert handled is True
     return json.loads(proc.stdin.getvalue())
+
+
+def run_tool_call_update(
+    client: CopilotACPClient,
+    update: dict,
+    tool_lines: dict | None = None,
+) -> None:
+    """Feed one streamed ``session/update`` tool_call through the real
+    handler, exactly as the stdout reader does."""
+    client._handle_server_message(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {"sessionId": "s", "update": update},
+        },
+        process=FakeProc(),
+        cwd="C:/tmp",
+        text_parts=[],
+        reasoning_parts=[],
+        tool_lines={} if tool_lines is None else tool_lines,
+    )
 
 
 def approved(response: dict) -> bool:
@@ -135,6 +175,42 @@ def skill_manage_tool(name: str = "throwaway") -> dict:
         "title": f"skill_manage create {name}",
         "rawInput": {"action": "create", "name": name},
         "_meta": {"claudeCode": {"toolName": "skill_manage"}},
+    }
+
+
+MCP_SKILL_MANAGE = "mcp__hermes-tools__skill_manage"
+CALL_ID = "toolu_015iwx9AcvQ2p6pyxQC7vD8V"
+
+
+def mcp_permission_toplevel(call_id: str = CALL_ID, name: str = "throwaway") -> dict:
+    """The REAL top-level wire shape, captured from an out-of-process dump of
+    claude-agent-acp: a toolCallId and ``kind="other"``, and NO claudeCode
+    sidecar. acp-agent.js only attaches ``_meta.claudeCode.toolName`` to a
+    permission request when ``parentToolUseId`` exists (subagent calls), so a
+    tool the user triggers in the main session arrives anonymous."""
+    return {
+        "toolCallId": call_id,
+        "kind": "other",
+        "title": f"skill_manage create {name}",
+        "rawInput": {"action": "create", "name": name},
+    }
+
+
+def mcp_tool_call_notification(
+    call_id: str = CALL_ID,
+    tool_name: str = MCP_SKILL_MANAGE,
+    status: str = "pending",
+) -> dict:
+    """The streamed ``tool_call`` that precedes the permission request and
+    DOES carry toolName, keyed by the same id."""
+    return {
+        "sessionUpdate": "tool_call",
+        "toolCallId": call_id,
+        "kind": "other",
+        "title": "skill_manage",
+        "status": status,
+        "rawInput": {"action": "create"},
+        "_meta": {"claudeCode": {"toolName": tool_name}},
     }
 
 
@@ -293,3 +369,162 @@ class TestToolAllowlist:
         assert not approved(run_permission(bash("rm -rf /")))
         assert not approved(run_permission(execute_unnamed("rm -rf /")))
         assert calls == []
+
+
+class TestToolNameEnrichment:
+    """A top-level permission request carries no toolName, so the gate used to
+    key every MCP tool on the single catch-all ``copilot-acp:other``. The name
+    does cross the wire on the preceding ``tool_call`` notification under the
+    same id; these pin the recovery, its fallback, and its precedence."""
+
+    def test_streamed_tool_call_yields_the_narrow_key(self, monkeypatch):
+        client = make_client()
+        run_tool_call_update(client, mcp_tool_call_notification())
+        calls = gate_spy(monkeypatch)
+        run_permission(mcp_permission_toplevel(), client=client)
+        assert len(calls) == 1
+        assert calls[0]["pattern_key"].startswith(
+            f"copilot-acp:{MCP_SKILL_MANAGE}:"
+        )
+
+    def test_cache_miss_falls_back_to_kind(self, monkeypatch):
+        """No notification seen for this id: behave exactly as before."""
+        calls = gate_spy(monkeypatch)
+        run_permission(mcp_permission_toplevel(), client=make_client())
+        assert len(calls) == 1
+        assert calls[0]["pattern_key"].startswith("copilot-acp:other:")
+
+    def test_per_tool_allowlist_entry_now_covers_a_top_level_call(
+        self, monkeypatch
+    ):
+        """The point of the whole change: grant the specific tool, not the
+        `other` catch-all that blesses every kind-"other" tool at once."""
+        allowlist(monkeypatch, [f"copilot-acp:{MCP_SKILL_MANAGE}"])
+        calls = gate_spy(monkeypatch)
+        client = make_client()
+        run_tool_call_update(client, mcp_tool_call_notification())
+        assert approved(run_permission(mcp_permission_toplevel(), client=client))
+        assert calls == [], "the narrow allowlist entry must skip the gate"
+
+    def test_narrow_grant_does_not_cover_a_different_tool(self, monkeypatch):
+        allowlist(monkeypatch, [f"copilot-acp:{MCP_SKILL_MANAGE}"])
+        client = make_client()
+        other_id = "toolu_other"
+        run_tool_call_update(
+            client,
+            mcp_tool_call_notification(
+                call_id=other_id, tool_name="mcp__hermes-tools__memory"
+            ),
+        )
+        calls = gate_spy(monkeypatch)
+        assert not approved(
+            run_permission(mcp_permission_toplevel(call_id=other_id), client=client)
+        )
+        assert len(calls) == 1
+        assert calls[0]["pattern_key"].startswith(
+            "copilot-acp:mcp__hermes-tools__memory:"
+        )
+
+    def test_meta_tool_name_wins_over_the_cache(self, monkeypatch):
+        """Subagent calls DO carry the sidecar; it is authoritative, and a
+        stale cache entry under the same id must not override it."""
+        client = make_client()
+        run_tool_call_update(
+            client, mcp_tool_call_notification(tool_name="StaleName")
+        )
+        subagent_call = mcp_permission_toplevel()
+        subagent_call["_meta"] = {
+            "claudeCode": {"toolName": MCP_SKILL_MANAGE, "parentToolUseId": "toolu_p"}
+        }
+        calls = gate_spy(monkeypatch)
+        run_permission(subagent_call, client=client)
+        assert len(calls) == 1
+        assert calls[0]["pattern_key"].startswith(
+            f"copilot-acp:{MCP_SKILL_MANAGE}:"
+        )
+
+    def test_shell_routing_unaffected_by_a_cached_name(self, monkeypatch):
+        """Recovering "Bash" must not divert an execute call out of the
+        dangerous-command matcher -- the hardline floor still applies."""
+        client = make_client()
+        run_tool_call_update(
+            client,
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "toolu_bash",
+                "kind": "execute",
+                "status": "pending",
+                "_meta": {"claudeCode": {"toolName": "Bash"}},
+            },
+        )
+        calls = gate_spy(monkeypatch)
+        call = execute_unnamed("rm -rf /")
+        call["toolCallId"] = "toolu_bash"
+        assert not approved(run_permission(call, client=client))
+        safe = execute_unnamed("ls -la")
+        safe["toolCallId"] = "toolu_bash"
+        assert approved(run_permission(safe, client=client))
+        assert calls == []
+
+
+class TestToolNameCacheLifetime:
+    def test_terminal_status_evicts(self):
+        client = make_client()
+        run_tool_call_update(client, mcp_tool_call_notification())
+        assert client._recall_tool_name(CALL_ID) == MCP_SKILL_MANAGE
+        run_tool_call_update(
+            client,
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": CALL_ID,
+                "status": "completed",
+                "_meta": {"claudeCode": {"toolName": MCP_SKILL_MANAGE}},
+            },
+        )
+        assert client._recall_tool_name(CALL_ID) == ""
+        assert client._tool_names_by_call_id == {}
+
+    def test_denied_call_is_evicted_too(self):
+        """A rejected permission resolves the call as `cancelled`, which is
+        terminal -- the entry must not linger for the rest of the session."""
+        client = make_client()
+        run_tool_call_update(client, mcp_tool_call_notification())
+        run_tool_call_update(
+            client,
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": CALL_ID,
+                "status": "cancelled",
+            },
+        )
+        assert client._tool_names_by_call_id == {}
+
+    def test_map_is_bounded(self):
+        from agent.copilot_acp_client import _TOOL_NAME_CACHE_MAX
+
+        client = make_client()
+        for i in range(_TOOL_NAME_CACHE_MAX + 25):
+            run_tool_call_update(
+                client,
+                mcp_tool_call_notification(call_id=f"toolu_{i}", tool_name=f"T{i}"),
+            )
+        assert len(client._tool_names_by_call_id) == _TOOL_NAME_CACHE_MAX
+        # Oldest evicted, newest kept.
+        assert client._recall_tool_name("toolu_0") == ""
+        last = _TOOL_NAME_CACHE_MAX + 24
+        assert client._recall_tool_name(f"toolu_{last}") == f"T{last}"
+
+    def test_update_without_a_name_does_not_clear_a_known_call(self):
+        """Later refinements can omit the sidecar; they must not wipe the
+        name the opening tool_call established."""
+        client = make_client()
+        run_tool_call_update(client, mcp_tool_call_notification())
+        run_tool_call_update(
+            client,
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": CALL_ID,
+                "status": "in_progress",
+            },
+        )
+        assert client._recall_tool_name(CALL_ID) == MCP_SKILL_MANAGE

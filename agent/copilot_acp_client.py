@@ -338,6 +338,13 @@ _TERMINAL_TOOL_STATUSES = frozenset(
     {"completed", "failed", "error", "cancelled", "canceled"}
 )
 
+#: Upper bound on the toolCallId -> toolName map used to enrich permission
+#: requests. Entries are evicted when their call reaches a terminal status, so
+#: this only catches calls that never settle (a killed child, a compaction that
+#: drops the tail). Oldest-first eviction past this many live calls.
+_TOOL_NAME_CACHE_MAX = 256
+
+
 def _acp_tool_display(fields: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Map a merged ACP tool call to the ``(name, args)`` Hermes' UI expects.
 
@@ -1070,6 +1077,12 @@ class CopilotACPClient:
         # completion builders after the turn settles; None when the agent
         # reported nothing.
         self._last_turn_usage: dict[str, Any] | None = None
+        # toolCallId -> _meta.claudeCode.toolName, harvested from the streamed
+        # tool_call notifications so a permission request that omits toolName
+        # can still be keyed per tool. Touched only from the stdout reader
+        # path, which handles notifications and permission requests on the
+        # same thread, so no lock is needed.
+        self._tool_names_by_call_id: dict[str, str] = {}
         self._sent_fingerprint: list[str] = []
         # Owning agent, for surfacing the remote agent's own tool calls to the
         # UI. Weak on purpose: the agent holds this client as ``agent.client``,
@@ -1909,6 +1922,50 @@ class CopilotACPClient:
                     name, exc_info=True,
                 )
 
+    def _remember_tool_name(self, update: dict[str, Any]) -> None:
+        """Cache a streamed tool call's ``toolName`` against its call id.
+
+        ``session/request_permission`` only carries
+        ``_meta.claudeCode.toolName`` when the call came from a subagent
+        (acp-agent.js attaches the sidecar alongside ``parentToolUseId``). A
+        TOP-LEVEL call arrives with no toolName at all, so the approval gate
+        falls back to the coarse ACP ``kind`` -- collapsing every MCP tool onto
+        the single key ``copilot-acp:other`` and making per-tool allowlisting
+        impossible for exactly the calls the user triggers by hand.
+
+        The name does cross the wire, just on a different message: the
+        ``tool_call`` notification carries it, keyed by the same id the
+        permission request uses (``toolUseID`` at both sites), and
+        ``requestPermissionFromClient`` awaits ``ensureToolCallEmitted`` before
+        issuing the request -- so the notification is always written first.
+        Caching it here lets the gate recover the narrow key.
+
+        Evicts on a terminal status, which is the call's own resolution
+        signal, and bounds the map for calls that never settle.
+        """
+        call_id = str(update.get("toolCallId") or "").strip()
+        if not call_id:
+            return
+        cache = self._tool_names_by_call_id
+        status = str(update.get("status") or "").strip().lower()
+        if status in _TERMINAL_TOOL_STATUSES:
+            cache.pop(call_id, None)
+            return
+        name = _acp_tool_name(update)
+        if not name:
+            return
+        # Re-insert so the bound below evicts the least recently seen call.
+        cache.pop(call_id, None)
+        cache[call_id] = name
+        while len(cache) > _TOOL_NAME_CACHE_MAX:
+            cache.pop(next(iter(cache)))
+
+    def _recall_tool_name(self, call_id: str) -> str:
+        """Tool name cached for ``call_id`` by a prior ``tool_call``, or ""."""
+        if not call_id:
+            return ""
+        return self._tool_names_by_call_id.get(call_id, "")
+
     def _handle_server_message(
         self,
         msg: dict[str, Any],
@@ -1932,6 +1989,10 @@ class CopilotACPClient:
             chunk_text = ""
             if isinstance(content, dict):
                 chunk_text = str(content.get("text") or "")
+            if kind in {"tool_call", "tool_call_update"}:
+                # Outside the display branch below on purpose: the approval
+                # gate needs this even on paths that stream nothing.
+                self._remember_tool_name(update)
             if kind == "agent_message_chunk" and chunk_text and text_parts is not None:
                 text_parts.append(chunk_text)
                 if emit is not None:
@@ -2017,7 +2078,20 @@ class CopilotACPClient:
                     _run_approval_gate,
                 )
 
+                # `_meta` first: a subagent call carries the authoritative
+                # toolName on the request itself. The cache is the fallback
+                # for top-level calls, which carry none -- see
+                # _remember_tool_name. A miss leaves tool_name empty and the
+                # gate keys on `kind` exactly as before.
+                call_id = str(tool_call.get("toolCallId") or "").strip()
                 tool_name = _acp_tool_name(tool_call)
+                if not tool_name:
+                    tool_name = self._recall_tool_name(call_id)
+                    if tool_name:
+                        logger.debug(
+                            "ACP permission toolName recovered from "
+                            "tool_call cache: %s (%s)", tool_name, call_id,
+                        )
                 kind = str(tool_call.get("kind") or "").strip()
                 shell_command = _acp_shell_command(tool_call)
 

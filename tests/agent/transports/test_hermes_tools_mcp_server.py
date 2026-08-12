@@ -336,3 +336,71 @@ class TestMain:
         monkeypatch.setattr(m, "_build_server", lambda: CrashingServer())
         rc = m.main([])
         assert rc == 1
+
+
+class TestSkillManageExposure:
+    """turn_finalizer.py gates background skill review on skill_manage being
+    a valid tool. Under a native ACP runtime the review fork reaches Hermes
+    tools only through this server, so without skill_manage here memory
+    review can write but skill review has no tool."""
+
+    def test_skill_manage_is_exposed(self):
+        from agent.transports.hermes_tools_mcp_server import EXPOSED_TOOLS
+
+        assert "skill_manage" in EXPOSED_TOOLS
+
+    def test_skill_manage_stays_plain_dispatch(self):
+        """skill_manage takes pure kwargs (tools/skill_manager_tool.py) and
+        must stay dispatchable through handle_function_call. If it ever
+        joins _AGENT_LOOP_TOOLS, it needs an override in
+        _AGENT_LOOP_DISPATCH or every call comes back refused -- the
+        invariant test above only sees tools already in both sets."""
+        from model_tools import _AGENT_LOOP_TOOLS
+
+        assert "skill_manage" not in _AGENT_LOOP_TOOLS
+
+    def test_skill_manage_dispatches_via_handle_function_call(self, monkeypatch):
+        import agent.transports.hermes_tools_mcp_server as m
+
+        calls: list = []
+
+        fake_defs = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "skill_manage",
+                    "description": "d",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string"},
+                            "name": {"type": "string"},
+                        },
+                    },
+                },
+            }
+        ]
+
+        class FakeMCP:
+            def __init__(self, *a, **kw):
+                self.handlers = {}
+
+            def add_tool(self, fn, name=None, description=None):
+                self.handlers[name] = fn
+
+        monkeypatch.setattr(
+            "mcp.server.fastmcp.FastMCP", FakeMCP, raising=False
+        )
+        monkeypatch.setattr(
+            "model_tools.get_tool_definitions", lambda **kw: fake_defs
+        )
+        monkeypatch.setattr(
+            "model_tools.handle_function_call",
+            lambda name, args: calls.append((name, args)) or "ok",
+        )
+
+        server = m._build_server()
+        result = server.handlers["skill_manage"](action="create", name="x")
+
+        assert result == "ok"
+        assert calls == [("skill_manage", {"action": "create", "name": "x"})]

@@ -127,6 +127,25 @@ def write_tool(path: str) -> dict:
     }
 
 
+def skill_manage_tool(name: str = "throwaway") -> dict:
+    """A non-shell MCP-style tool call -- the real driver of the else branch
+    and the concrete case approvals.tool_allowlist exists to auto-approve."""
+    return {
+        "kind": "other",
+        "title": f"skill_manage create {name}",
+        "rawInput": {"action": "create", "name": name},
+        "_meta": {"claudeCode": {"toolName": "skill_manage"}},
+    }
+
+
+def allowlist(monkeypatch, patterns) -> None:
+    """Pin approvals.tool_allowlist for the real handler's gate check."""
+    monkeypatch.setattr(
+        approval, "_get_approval_config",
+        lambda: {"mode": "manual", "tool_allowlist": list(patterns)},
+    )
+
+
 def gate_spy(monkeypatch) -> list[dict]:
     """Wrap the real _run_approval_gate, recording kwargs. The handler
     imports it at call time, so patching the module attribute intercepts."""
@@ -223,3 +242,54 @@ class TestPatternKeyGrain:
         assert approval.is_approved("some-other-session", key_a), (
             "permanent grants are session-independent"
         )
+
+
+class TestToolAllowlist:
+    """approvals.tool_allowlist auto-approves non-shell tools by their stable
+    provider key -- the thing command_allowlist can't do because the tool
+    branch keys each call with an unpredictable per-target hash."""
+
+    def test_allowlisted_tool_auto_approves_without_a_card(self, monkeypatch):
+        allowlist(monkeypatch, ["copilot-acp:skill_manage"])
+        calls = gate_spy(monkeypatch)
+        assert approved(run_permission(skill_manage_tool()))
+        assert calls == [], "an allowlisted tool must never reach the gate"
+
+    def test_allowlist_ignores_the_per_target_hash(self, monkeypatch):
+        # One entry covers every target of that tool: the match is on the
+        # hash-free key, so different targets need no separate approval.
+        allowlist(monkeypatch, ["copilot-acp:skill_manage"])
+        calls = gate_spy(monkeypatch)
+        assert approved(run_permission(skill_manage_tool("alpha")))
+        assert approved(run_permission(skill_manage_tool("beta")))
+        assert calls == []
+
+    def test_glob_covers_every_non_shell_tool(self, monkeypatch):
+        allowlist(monkeypatch, ["copilot-acp:*"])
+        calls = gate_spy(monkeypatch)
+        assert approved(run_permission(write_tool("C:/tmp/probe-a.txt")))
+        assert approved(run_permission(skill_manage_tool()))
+        assert calls == []
+
+    def test_non_allowlisted_tool_still_gates(self, monkeypatch):
+        allowlist(monkeypatch, ["copilot-acp:skill_manage"])
+        calls = gate_spy(monkeypatch)
+        # Write is not on the list, so it still gates and fails closed.
+        assert not approved(run_permission(write_tool("C:/tmp/probe-a.txt")))
+        assert len(calls) == 1
+
+    def test_empty_allowlist_preserves_gating(self, monkeypatch):
+        allowlist(monkeypatch, [])
+        calls = gate_spy(monkeypatch)
+        assert not approved(run_permission(skill_manage_tool()))
+        assert len(calls) == 1
+
+    def test_allowlist_does_not_bypass_shell_hardline(self, monkeypatch):
+        # The allowlist only relaxes the NON-shell branch. Shell commands
+        # still run the dangerous-pattern matcher, hardline floor included,
+        # so `copilot-acp:*` cannot unblock `rm -rf /`.
+        allowlist(monkeypatch, ["copilot-acp:*"])
+        calls = gate_spy(monkeypatch)
+        assert not approved(run_permission(bash("rm -rf /")))
+        assert not approved(run_permission(execute_unnamed("rm -rf /")))
+        assert calls == []

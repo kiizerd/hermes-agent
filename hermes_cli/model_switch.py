@@ -1151,6 +1151,18 @@ def resolve_alias(
     except Exception:
         pass
 
+    # An alias that is ALSO a real model id on this provider is not an alias to
+    # resolve -- it is the id. claude-agent-acp advertises bare "opus" /
+    # "sonnet" / "haiku" as selectable models, and "opus" there means the
+    # current Opus generation. Without this short-circuit the family search
+    # below rewrites that explicit pick to a versioned sibling in the same
+    # catalog ("claude-opus-4-8"), so picking Opus 5 silently lands on Opus 4.8
+    # and the newer model is unreachable. Returns the catalog's own spelling so
+    # the stored id keeps its canonical case.
+    exact = next((mid for mid in catalog if mid.lower() == key), None)
+    if exact is not None:
+        return (current_provider, exact, key)
+
     # For aggregators, models are vendor/model-name format
     aggregator = is_aggregator(current_provider)
 

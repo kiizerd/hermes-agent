@@ -14,6 +14,7 @@ import {
   type SessionInfo,
   type SessionResumeResponse
 } from '@/hermes'
+import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
 import { requestGatewayForAgent } from '@/store/gateway'
@@ -1204,6 +1205,7 @@ describe('resumeSession failure recovery', () => {
         [
           'runtime-stale',
           {
+            acpPermission: EMPTY_ACP_PERMISSION,
             awaitingResponse: false,
             branch: '',
             busy: false,

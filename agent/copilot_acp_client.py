@@ -529,6 +529,18 @@ def _select_acp_model(request: Any, session: Any, session_id: str, model: str) -
         logger.debug("ACP session/set_config_option for model %r failed: %s", match, exc)
 
 
+# Permission-mode ids claude-agent-acp advertises. Only used as a FALLBACK for
+# a UI that has to draw the menu before a session exists; once one is open,
+# _acp_mode_ids() reads the real advertised list off the session/new response.
+# Never treat this as authoritative -- an agent is free to advertise its own.
+_FALLBACK_ACP_MODE_IDS: tuple[str, ...] = (
+    "default",
+    "plan",
+    "acceptEdits",
+    "bypassPermissions",
+)
+
+
 def _acp_mode_ids(session: Any) -> list[str]:
     """Permission-mode ids advertised by an ACP agent's session/new response."""
     if not isinstance(session, dict):
@@ -545,14 +557,199 @@ def _acp_mode_ids(session: Any) -> list[str]:
     return ids
 
 
-def _requested_acp_mode() -> str:
-    """Permission mode to request, from HERMES_ACP_PERMISSION_MODE.
+def _acp_config(*keys: str, default: Any = None) -> Any:
+    """Read one ``copilot_acp.*`` config value, or ``default`` on any miss.
 
-    Empty by default: an unset variable leaves the agent on whatever mode it
+    Imported lazily and read through ``load_config_readonly``: this module is
+    also loaded by out-of-process probe scripts and early in CLI startup, so a
+    module-scope import of the config layer would turn a missing or malformed
+    config.yaml into an import error instead of a fallback.
+
+    Every caller is on a session-setup path (``_ensure_session``), so this runs
+    once per ACP session rather than once per turn.
+    """
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        return cfg_get(load_config_readonly(), "copilot_acp", *keys, default=default)
+    except Exception:  # pragma: no cover - config layer is best-effort here
+        return default
+
+
+def _acp_config_str(*keys: str) -> str:
+    """``_acp_config`` narrowed to a stripped string ("" when unset/wrong type)."""
+    value = _acp_config(*keys, default="")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _acp_config_list(*keys: str) -> list[str]:
+    """``_acp_config`` narrowed to a list of non-empty strings.
+
+    A single string is accepted as a one-element list: YAML makes
+    ``allowed_tools: Read`` an easy thing to write, and silently dropping it
+    would look like the setting was ignored.
+    """
+    value = _acp_config(*keys, default=None)
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+# Server names the bridge owns. A config entry using one of these would land in
+# the same `mcpServers[server.name]` slot on the agent side (acp-agent.js builds
+# a dict keyed by name, so the later entry silently wins) and could replace
+# Hermes' own tool surface with an arbitrary remote endpoint. The bridge wins;
+# a colliding config entry is dropped with a warning.
+_RESERVED_ACP_MCP_NAMES = frozenset({"hermes-tools"})
+
+# Unresolved ``${VAR}`` / ``${env:VAR}`` refs. hermes_cli.config keeps these
+# verbatim when the variable is missing rather than raising, so a config that
+# references a key absent from .env reaches here as a literal placeholder --
+# which would be sent as the header value and fail as a silent 401.
+_UNEXPANDED_CONFIG_REF = re.compile(r"\$\{[^}]+\}")
+
+
+def _config_ref_leaked(*values: Any) -> bool:
+    """True when any value still carries an unexpanded ``${...}`` ref."""
+    for value in values:
+        if isinstance(value, str) and _UNEXPANDED_CONFIG_REF.search(value):
+            return True
+        if isinstance(value, dict) and _config_ref_leaked(*value.values()):
+            return True
+        if isinstance(value, (list, tuple)) and _config_ref_leaked(*value):
+            return True
+    return False
+
+
+def _acp_mcp_server_entry(name: str, cfg: Any) -> dict[str, Any] | None:
+    """Translate one Hermes ``mcp_servers.<name>`` block to an ACP entry.
+
+    Returns None when the server cannot or must not be forwarded. Pure and
+    module-level so the mapping can be unit-tested without a live client.
+
+    The two shapes acp-agent.js accepts (``dist/acp-agent.js``, the
+    ``mcpServers`` loop in ``newSession``) are narrower than Hermes' own
+    config, and the mismatch is silent on the wire -- an unknown key is simply
+    never read -- so the translation is explicit rather than a passthrough:
+
+    * stdio: ``{name, command, args, env}``. The ``type`` key must be **absent**
+      entirely; the agent's branch is ``else if (!("type" in server))``, so even
+      ``type: "stdio"`` falls through both arms and the server is dropped.
+    * http/sse: ``{name, type, url, headers}``.
+
+    ``env`` and ``headers`` are arrays of ``{name, value}`` pairs, not objects
+    (the agent runs ``Object.fromEntries(headers.map(e => [e.name, e.value]))``).
+
+    Keys with no ACP equivalent are dropped rather than passed through: ``cwd``
+    (the agent does not read it for stdio servers), ``timeout`` /
+    ``connect_timeout`` (no field on either shape), ``sampling``, and
+    ``description``.
+    """
+    if not isinstance(cfg, dict):
+        return None
+    name = (name or "").strip()
+    if not name:
+        return None
+    if name in _RESERVED_ACP_MCP_NAMES:
+        logger.warning(
+            "ACP MCP forward: skipping config server %r -- the name is reserved "
+            "by the Hermes tool bridge and would replace it",
+            name,
+        )
+        return None
+    # Honour the disable flag. hermes_cli.config auto-sets `enabled: false` on
+    # MCP entries it flags during migration, so forwarding regardless of it
+    # would quietly re-enable a server Hermes deliberately switched off.
+    if cfg.get("enabled") is False:
+        return None
+
+    command = cfg.get("command")
+    url = cfg.get("url")
+    entry: dict[str, Any]
+    if command:
+        args = cfg.get("args") or []
+        env = cfg.get("env") or {}
+        # ``env`` is emitted even when empty. The agent writes
+        # ``env: server.env ? Object.fromEntries(...) : undefined``, and a
+        # stdio server that reaches the SDK with ``env`` unset is silently
+        # never spawned -- no error, no log, the tools just never appear.
+        # Measured on the real wire: 4 runs, omitted env spawned 0/2 and
+        # ``env: []`` spawned 2/2 (probe_config_mcp.py). The SDK's own type
+        # marks the field optional, so this is behaviour, not schema.
+        entry = {
+            "name": name,
+            "command": str(command),
+            "args": [str(a) for a in args]
+            if isinstance(args, (list, tuple))
+            else [],
+            "env": [{"name": str(k), "value": str(v)} for k, v in env.items()]
+            if isinstance(env, dict)
+            else [],
+        }
+    elif url:
+        transport = str(cfg.get("transport") or "").strip().lower()
+        headers = cfg.get("headers") or {}
+        # Same always-emit rule as stdio's env, for the same reason: the
+        # agent's ternary turns a missing key into `undefined` rather than an
+        # empty object, and that difference is what decides whether the server
+        # is started at all.
+        entry = {
+            "name": name,
+            "type": "sse" if transport == "sse" else "http",
+            "url": str(url),
+            "headers": [{"name": str(k), "value": str(v)} for k, v in headers.items()]
+            if isinstance(headers, dict)
+            else [],
+        }
+    else:
+        logger.warning(
+            "ACP MCP forward: skipping config server %r -- no command or url", name
+        )
+        return None
+
+    # Last gate: an unexpanded ${VAR} means the referenced key is missing from
+    # the environment. Forwarding it sends the literal placeholder as a header
+    # or env value, which the remote rejects as an auth failure that looks
+    # nothing like a config problem. Drop it and say why instead.
+    if _config_ref_leaked(entry):
+        logger.warning(
+            "ACP MCP forward: skipping config server %r -- it references an "
+            "environment variable that is not set (check %s/.env)",
+            name,
+            os.environ.get("HERMES_HOME") or "~/.hermes",
+        )
+        return None
+    return entry
+
+
+def _requested_acp_mode(session_override: str = "") -> str:
+    """Permission mode to request: env var, then per-session pick, then config.
+
+    Empty by default: an unset value leaves the agent on whatever mode it
     chose for itself, so this never silently widens what runs without a human
     approving it. Opting in is a deliberate act by the operator.
+
+    The environment variable wins over both so a launcher (systemd unit,
+    gateway, wrapper script) can pin a mode for the process it starts without
+    anything downstream quietly loosening it.
+
+    ``session_override`` is one chat's own pick (the composer's permission-mode
+    pill, ``/permission-mode``), held on the client instance rather than in
+    config -- see ``CopilotACPClient._mode_override``. It outranks config
+    because it is the more specific form of the same user intent: config says
+    what new chats start on, the override says what THIS chat runs on. The
+    whole ladder lives here so the two call sites (session setup and mid-session
+    re-sync) cannot drift apart.
     """
-    return (os.environ.get("HERMES_ACP_PERMISSION_MODE") or "").strip()
+    env = (os.environ.get("HERMES_ACP_PERMISSION_MODE") or "").strip()
+    if env:
+        return env
+    override = (session_override or "").strip()
+    if override:
+        return override
+    return _acp_config_str("permission_mode")
 
 
 def _select_acp_mode(request: Any, session: Any, session_id: str, mode: str) -> None:
@@ -1047,6 +1244,7 @@ class CopilotACPClient:
         acp_cwd: str | None = None,
         command: str | None = None,
         args: list[str] | None = None,
+        advisory: bool = False,
         **_: Any,
     ):
         self.api_key = api_key or "copilot-acp"
@@ -1055,6 +1253,14 @@ class CopilotACPClient:
         self._acp_command = acp_command or command or _resolve_command()
         self._acp_args = list(acp_args or args or _resolve_args())
         self._acp_cwd = str(Path(acp_cwd or os.getcwd()).resolve())
+        # Advisory (non-agentic) client: the MoA reference fan-out and other
+        # pure text-in/text-out auxiliary calls. When set, the ACP session is
+        # opened with an empty built-in tools array AND no hermes-tools MCP
+        # servers, so the sub-agent cannot call a tool at all. This enforces
+        # the reference advisor's "you cannot call tools" contract at the
+        # transport instead of trusting the prompt, and removes the per-tool
+        # approval round-trips that were timing advisors out.
+        self._advisory = bool(advisory)
         self.chat = _ACPChatNamespace(self)
         self.is_closed = False
         self._active_process: subprocess.Popen[str] | None = None
@@ -1072,6 +1278,24 @@ class CopilotACPClient:
         # tracked to force a rebuild rather than letting cross-session recall
         # keep filtering against a session the user already left.
         self._session_hermes_id: str | None = None
+        # session/new response for the live session, kept so the permission
+        # mode can be re-negotiated mid-session: _acp_mode_ids() reads the
+        # advertised modes out of it, and they are only sent once, at setup.
+        self._session_info: dict[str, Any] = {}
+        # Permission mode last handed to the agent. Tracked so a config change
+        # is applied exactly once instead of on every turn.
+        self._applied_mode: str = ""
+        # Per-session permission-mode pick, set by the desktop composer pill /
+        # `/permission-mode` through set_permission_mode(). Held on the CLIENT,
+        # not in config: every AIAgent builds its own CopilotACPClient
+        # (agent_runtime_helpers.create_openai_client), so two panes side by
+        # side each own their mode. Writing config.copilot_acp.permission_mode
+        # instead would silently retarget every other open chat.
+        #
+        # Deliberately NOT cleared by _shutdown_process: the pick belongs to the
+        # Hermes chat, not to the child process, so it must survive the session
+        # rebuild that a model switch forces.
+        self._mode_override: str = ""
         # PromptResponse.usage from the most recent session/prompt result,
         # camelCase per claude-agent-acp's sessionUsage(). Read by the
         # completion builders after the turn settles; None when the agent
@@ -1103,6 +1327,84 @@ class CopilotACPClient:
         ref = self._agent_ref
         return ref() if ref is not None else None
 
+    def _restrict_to_hermes_tools(self) -> bool:
+        """True when this session must expose ONLY the hermes-tools MCP surface.
+
+        Set by the background memory/skill review fork
+        (``agent/background_review.py``). That fork is designed to run
+        tool-restricted: it installs a thread-local whitelist of memory + skill
+        tools via ``set_thread_tool_whitelist``. But that whitelist is enforced
+        at *Hermes'* dispatch layer, and a native-tool ACP agent runs Bash /
+        Edit / Write / Read inside its own subprocess, which never passes
+        through that layer. So on this provider the whitelist could not reach
+        the tools that actually matter, and the fork ran with full shell and
+        file-write access against a harness prompt telling it to rewrite the
+        skill library.
+
+        Read off the bound agent rather than taken as a constructor argument:
+        the client is built during ``AIAgent.__init__`` (agent_init.py), while
+        the review fork stamps its markers on the agent immediately after
+        construction. The ACP session opens lazily on the first prompt, so by
+        the time this is consulted the marker is in place.
+        """
+        agent = self._agent()
+        if agent is None:
+            return False
+        return bool(getattr(agent, "_acp_restrict_to_hermes_tools", False))
+
+    def _effective_acp_mode(self) -> str:
+        """This client's permission mode, session pick included.
+
+        Thin wrapper so ``_requested_acp_mode`` stays the single owner of the
+        env > session > config ladder. ``permission_mode_state`` reports
+        ``locked`` when the env pin is what won, so a dropdown can disable
+        itself rather than accept clicks it cannot honour.
+        """
+        return _requested_acp_mode(self._mode_override)
+
+    def set_permission_mode(self, mode: str) -> str:
+        """Pin this client's permission mode; return the effective value.
+
+        Applied at the next ``_ensure_session`` (``_sync_acp_mode`` re-sends a
+        *changed* mode on a live session, no rebuild). Not pushed from here on
+        purpose: this is called from the gateway's request thread, while
+        ``self._rpc`` belongs to whichever thread holds ``_session_lock`` for
+        the running turn. Landing at the next turn boundary is also the honest
+        semantic -- a mode cannot retroactively govern a prompt already in
+        flight.
+
+        An empty ``mode`` clears the override and falls back to config. It does
+        NOT mean "reset the agent to default": an empty effective value leaves
+        the agent wherever it is, same contract as ``_sync_acp_mode``.
+        """
+        self._mode_override = (mode or "").strip()
+        return self._effective_acp_mode()
+
+    def permission_mode_state(self) -> dict[str, Any]:
+        """Snapshot for the UI: effective value, where it came from, options.
+
+        ``options`` prefers the ids the live agent actually advertised over the
+        static fallback, so a dropdown built against this can never offer a
+        mode the agent would reject.
+        """
+        env = (os.environ.get("HERMES_ACP_PERMISSION_MODE") or "").strip()
+        if env:
+            source = "env"
+        elif self._mode_override:
+            source = "session"
+        elif _acp_config_str("permission_mode"):
+            source = "config"
+        else:
+            source = "agent"
+        advertised = _acp_mode_ids(self._session_info)
+        return {
+            "value": self._effective_acp_mode(),
+            "source": source,
+            "locked": bool(env),
+            "options": advertised or list(_FALLBACK_ACP_MODE_IDS),
+            "advertised": bool(advertised),
+        }
+
     def close(self) -> None:
         self._shutdown_process()
         self.is_closed = True
@@ -1116,6 +1418,8 @@ class CopilotACPClient:
         self._session_id = None
         self._session_model = None
         self._session_hermes_id = None
+        self._session_info = {}
+        self._applied_mode = ""
         self._sent_fingerprint = []
         self._inbox = None
         self._next_request_id = 0
@@ -1504,6 +1808,8 @@ class CopilotACPClient:
         if _resolve_tool_mode(self._acp_command, self._acp_args) != "native":
             return None
         raw = (os.environ.get("HERMES_ACP_THINKING_DISPLAY") or "").strip().lower()
+        if not raw:
+            raw = _acp_config_str("thinking_display").lower()
         if raw in {"off", "none", "0", "false"}:
             return None
         # Adaptive thinking is Opus/Sonnet 4.6+. Haiku still takes a fixed token
@@ -1529,6 +1835,11 @@ class CopilotACPClient:
 
         Opt out with HERMES_ACP_HERMES_TOOLS=off.
         """
+        # Advisory sessions are tool-less by contract; never spawn the MCP
+        # subprocess for them (it would expose web/memory/skills tools and add
+        # startup latency to a call that only needs to return text).
+        if self._advisory:
+            return []
         if _resolve_tool_mode(self._acp_command, self._acp_args) != "native":
             return []
         raw = (os.environ.get("HERMES_ACP_HERMES_TOOLS") or "").strip().lower()
@@ -1564,6 +1875,54 @@ class CopilotACPClient:
             }
         ]
 
+    def _config_mcp_servers(self) -> list[dict[str, Any]]:
+        """ACP ``mcpServers`` entries for Hermes' own ``mcp_servers:`` config.
+
+        Without this, a server configured in config.yaml is reachable from
+        Hermes-native chat but invisible inside an ACP turn: the native agent
+        builds its tool list from what it is handed at session setup plus its
+        own settings files, and Hermes' config is neither.
+
+        Forwarded servers *merge* with the ones the agent loads for itself
+        rather than replacing them (verified on the wire, probe_mcp_merge.py),
+        so this adds to whatever the agent already had.
+
+        Read through ``load_config_readonly`` so ``${VAR}`` refs arrive
+        expanded -- ``read_raw_config`` would hand back literal placeholders.
+        The result is never mutated, per that function's contract.
+
+        Opt out with HERMES_ACP_CONFIG_MCP=off.
+        """
+        # Both tool-suppressed session kinds are excluded. Advisory sessions
+        # are tool-less by contract, and the background memory/skill review
+        # fork is restricted to the hermes-tools surface precisely because its
+        # Hermes-side whitelist cannot reach tools the ACP subprocess runs
+        # itself -- handing either one a network MCP server would reopen the
+        # hole that restriction closed.
+        if self._advisory or self._restrict_to_hermes_tools():
+            return []
+        if _resolve_tool_mode(self._acp_command, self._acp_args) != "native":
+            return []
+        raw = (os.environ.get("HERMES_ACP_CONFIG_MCP") or "").strip().lower()
+        if raw in {"off", "none", "0", "false"}:
+            return []
+
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            servers = load_config_readonly().get("mcp_servers")
+        except Exception:  # pragma: no cover - config layer is best-effort here
+            return []
+        if not isinstance(servers, dict):
+            return []
+
+        entries: list[dict[str, Any]] = []
+        for name in sorted(servers):
+            entry = _acp_mcp_server_entry(name, servers[name])
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
     def _ensure_session(self, *, model: str | None, timeout_seconds: float) -> str:
         """Return a live ACP session id, opening one if needed.
 
@@ -1576,6 +1935,7 @@ class CopilotACPClient:
             and self._session_model == (model or "")
             and self._session_hermes_id == _current_hermes_session_id()
         ):
+            self._sync_acp_mode(timeout_seconds=timeout_seconds)
             return str(self._session_id)
 
         self._shutdown_process()
@@ -1601,12 +1961,58 @@ class CopilotACPClient:
         )
         session_params: dict[str, Any] = {
             "cwd": self._acp_cwd,
-            "mcpServers": self._hermes_tools_mcp_servers(),
+            # Bridge first, config after: the agent keys these by name, so
+            # ordering only matters on a collision -- and _acp_mcp_server_entry
+            # already drops config entries that would collide.
+            "mcpServers": self._hermes_tools_mcp_servers()
+            + self._config_mcp_servers(),
         }
         claude_options: dict[str, Any] = {}
         thinking = self._acp_thinking_option(model)
         if thinking is not None:
             claude_options["thinking"] = thinking
+        # Tool-less advisory session. An empty tools array makes
+        # claude-agent-acp expose zero built-in tools: it reads
+        # `userProvidedOptions?.tools ?? <claude_code preset>`, and `[]` is a
+        # present value, so the preset is never applied (acp-agent.js). Combined
+        # with the empty mcpServers from _hermes_tools_mcp_servers(), the
+        # sub-agent has no tool it could call. Verified on the live wire against
+        # claude-agent-acp with a negative control (probe_toolless.py).
+        #
+        # `restricted` is the background-review fork: same empty built-in tools
+        # array, but the hermes-tools MCP server is KEPT so the fork can still
+        # write memories and skills. MCP tools survive tools=[] -- verified on
+        # the wire with a control arm (probe_toolless_mcp.py). Without this the
+        # fork ran as a full Claude with shell and file-write access, because
+        # its Hermes-side thread tool whitelist only guards Hermes' own
+        # dispatch layer and cannot reach tools the ACP subprocess runs itself.
+        restricted = self._restrict_to_hermes_tools()
+        if self._advisory or restricted:
+            claude_options["tools"] = []
+        # Tool allow / deny lists. Both are additive rather than replacing what
+        # the agent decided for itself: disallowedTools is concatenated with
+        # the agent's own list, and allowedTools rides the
+        # `...userProvidedOptions` spread straight into the SDK options
+        # (acp-agent.js). Skipped for advisory and review sessions, which
+        # already hold zero built-in tools -- a list there would be noise on
+        # the wire.
+        if not self._advisory and not restricted:
+            allowed_tools = _acp_config_list("allowed_tools")
+            if allowed_tools:
+                claude_options["allowedTools"] = allowed_tools
+            disallowed_tools = _acp_config_list("disallowed_tools")
+            if disallowed_tools:
+                claude_options["disallowedTools"] = disallowed_tools
+        # Extra readable roots -- the `--add-dir` equivalent. The agent
+        # concatenates these with the official ACP `additionalDirectories`
+        # field rather than choosing between them, so nothing is lost by
+        # sending them through _meta.
+        extra_dirs = [
+            os.path.expanduser(os.path.expandvars(d))
+            for d in _acp_config_list("additional_directories")
+        ]
+        if extra_dirs:
+            claude_options["additionalDirectories"] = extra_dirs
         # Model is negotiated twice, deliberately. session/set_config_option
         # (below) only accepts values the agent advertises in configOptions --
         # aliases like "opus", never a raw API id: probing
@@ -1621,8 +2027,19 @@ class CopilotACPClient:
             self._acp_command, self._acp_args
         ) == "native":
             claude_options["model"] = requested_model
+        session_meta: dict[str, Any] = {}
         if claude_options:
-            session_params["_meta"] = {"claudeCode": {"options": claude_options}}
+            session_meta["claudeCode"] = {"options": claude_options}
+        # System prompt append. The OBJECT form is required: acp-agent.js locks
+        # type/preset to the claude_code preset and forwards the rest of the
+        # object, whereas a plain string REPLACES the preset outright and would
+        # strip the agent's own built-in instructions. This rides top-level
+        # _meta, not _meta.claudeCode.options.
+        append_text = _acp_config_str("system_prompt_append")
+        if append_text:
+            session_meta["systemPrompt"] = {"append": append_text}
+        if session_meta:
+            session_params["_meta"] = session_meta
         session = self._rpc(
             "session/new",
             session_params,
@@ -1652,7 +2069,7 @@ class CopilotACPClient:
         # Permission mode, same negotiate-don't-assume shape as the model.
         # Unset by default so the approval gate keeps firing unless the
         # operator explicitly opts into a wider mode.
-        requested_mode = _requested_acp_mode()
+        requested_mode = self._effective_acp_mode()
         if requested_mode:
             _select_acp_mode(
                 lambda method, params: self._rpc(
@@ -1666,8 +2083,43 @@ class CopilotACPClient:
         self._session_id = session_id
         self._session_model = model or ""
         self._session_hermes_id = _current_hermes_session_id()
+        self._session_info = session if isinstance(session, dict) else {}
+        self._applied_mode = requested_mode
         self._sent_fingerprint = []
         return session_id
+
+    def _sync_acp_mode(self, *, timeout_seconds: float) -> None:
+        """Re-apply the configured permission mode to an already-open session.
+
+        The mode is negotiated at session/new, but a session deliberately
+        spans many turns, so without this a change to
+        ``copilot_acp.permission_mode`` would sit inert until the session
+        happened to rebuild -- which reads as the setting being ignored.
+        ``session/set_mode`` is valid on a live session, so the new value can
+        be applied in place, and switching in or out of plan mode takes effect
+        on the next turn of the same chat.
+
+        Only a *change* is sent. Re-sending an unchanged value would cost an
+        RPC per turn, and an empty value means "leave the agent wherever it
+        is", never "reset it to default" -- clearing the setting must not
+        silently narrow or widen a mode the user chose in the agent itself.
+        """
+        session_id = self._session_id
+        requested = self._effective_acp_mode()
+        if not session_id or not requested or requested == self._applied_mode:
+            return
+        _select_acp_mode(
+            lambda method, params: self._rpc(
+                method, params, timeout_seconds=timeout_seconds
+            ),
+            self._session_info,
+            session_id,
+            requested,
+        )
+        # Recorded even when the agent rejected the id: _select_acp_mode
+        # already logged why, and retrying it every turn would just repeat the
+        # same warning for the life of the session.
+        self._applied_mode = requested
 
     def _prompt_session(
         self,

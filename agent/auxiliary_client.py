@@ -7552,13 +7552,38 @@ def resolve_provider_client(
                     provider,
                 )
                 return None, None
+            _extproc_kwargs = {
+                "api_key": api_key,
+                "base_url": base_url,
+                "command": command,
+                "args": args,
+            }
+            # The MoA reference fan-out (task="moa_reference") is an ADVISOR:
+            # it analyses the conversation and returns text for the aggregator,
+            # and must not execute tools. Ask the profile for a tool-less
+            # client so the sub-agent physically cannot call one, rather than
+            # relying on the advisory system prompt. The aggregator
+            # (task="moa_aggregator") and any other task keep full tools.
+            # Passed through the profile seam, not hardcoded to the ACP client,
+            # so an out-of-tree external-process provider can honour it too.
+            if task == "moa_reference":
+                _extproc_kwargs["advisory"] = True
             try:
-                client = _extproc_profile.create_client(
-                    api_key=api_key,
-                    base_url=base_url,
-                    command=command,
-                    args=args,
+                client = _extproc_profile.create_client(**_extproc_kwargs)
+            except TypeError:
+                # Profile's client does not accept the advisory contract. Drop
+                # it rather than losing the provider outright; the advisory
+                # system prompt remains the backstop for this fan-out.
+                if "advisory" not in _extproc_kwargs:
+                    raise
+                _extproc_kwargs.pop("advisory")
+                logger.warning(
+                    "resolve_provider_client: profile %r does not support the "
+                    "tool-less advisory contract; the reference advisor keeps "
+                    "its tools",
+                    provider,
                 )
+                client = _extproc_profile.create_client(**_extproc_kwargs)
             except Exception:
                 logger.warning(
                     "resolve_provider_client: profile %r failed to create an "
@@ -8122,7 +8147,7 @@ def resolve_vision_provider_client(
 
 def get_auxiliary_extra_body() -> dict:
     """Return extra_body kwargs for auxiliary API calls.
-    
+
     Includes Nous Portal product tags when the auxiliary client is backed
     by Nous Portal. Returns empty dict otherwise.
     """
@@ -8232,10 +8257,15 @@ def _client_cache_key(
     ) if provider == "auto" else ()
     # `auto` can now resolve through task-specific or main fallback policy,
     # so the task participates in the cache key. Non-auto providers keep the
-    # old cache shape because the explicit provider/model tuple is sufficient.
+    # old cache shape because the explicit provider/model tuple is sufficient
+    # — EXCEPT copilot-acp, whose client is built differently per task: a
+    # `moa_reference` call builds a TOOL-LESS advisory client, every other
+    # task a full-tool one. Without the task in the key those would share one
+    # cache entry and a `moa_aggregator` (or ordering flip) could hand an
+    # advisor a tool-holding session, or vice versa. So key copilot-acp by task.
     task_key = (
         (task or "", _task_prefers_fast_model(task))
-        if provider == "auto"
+        if provider in ("auto", "copilot-acp")
         else ""
     )
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)

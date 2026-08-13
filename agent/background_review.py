@@ -1503,6 +1503,28 @@ def _run_review_in_thread(
             review_agent, _rt, _routed = build_cache_parity_fork(
                 agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS
             )
+            # The fork is otherwise silent on success (three logger.warning,
+            # zero logger.info), so "never fired" was indistinguishable from
+            # "fired and wrote nothing". INFO reaches the file handler even
+            # from this worker thread: thread_scoped_silence() redirects only
+            # this thread's stdout/stderr, and agent.log is a FileHandler.
+            logger.info(
+                "background-review fork starting: provider=%s model=%s routed=%s",
+                _rt.get("provider"),
+                _rt.get("model"),
+                _routed,
+            )
+            # Native-tool transports (Claude via copilot-acp) run their own
+            # Bash/Edit/Write/Read INSIDE the agent subprocess, so those calls
+            # never reach Hermes' dispatch layer and the thread-local whitelist
+            # installed below cannot deny them. This marker tells
+            # CopilotACPClient._restrict_to_hermes_tools() to open the fork's
+            # session with an empty built-in tools array while keeping the
+            # hermes-tools MCP server, which is the only surface the review
+            # actually needs (memory + skill_manage). Verified on the wire:
+            # MCP tools survive tools=[] (probe_toolless_mcp.py). Inert on
+            # every other provider, where the whitelist already suffices.
+            review_agent._acp_restrict_to_hermes_tools = True
 
             # Register this fork on the PARENT's _active_children (the same
             # list interrupt() fans out to for subagent delegation) and
@@ -1705,6 +1727,11 @@ def _run_review_in_thread(
         _log_review_completion(
             review_usage, _classify_review_result(actions)
         )
+        logger.info(
+            "background-review finished: %d action(s)%s",
+            len(actions),
+            (" — " + " · ".join(actions)) if actions else "",
+        )
 
         if actions:
             summary = " · ".join(dict.fromkeys(actions))
@@ -1797,6 +1824,24 @@ def spawn_background_review_thread(
             f"focus — prioritize it over the general instructions above:\n"
             f"{focus}"
         )
+
+    # Instrumentation. The review fork is otherwise silent on success (only
+    # failures logged), so there was no way to tell "never fired" from "fired
+    # and found nothing to write" -- which matters most on native-tool
+    # providers, where the thread-local tool whitelist below cannot reach the
+    # sub-agent's own tools. INFO lands in ~/.hermes/logs/agent.log via the
+    # root file handler; thread_scoped_silence() only redirects the worker
+    # thread's stdout/stderr, so records from inside the fork still arrive.
+    logger.info(
+        "background-review requested: memory=%s skills=%s focus=%s "
+        "provider=%s model=%s session=%s",
+        review_memory,
+        review_skills,
+        bool(focus),
+        getattr(agent, "provider", "?"),
+        getattr(agent, "model", "?"),
+        getattr(agent, "session_id", "?"),
+    )
 
     def _target() -> None:
         _run_review_in_thread(

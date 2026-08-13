@@ -129,6 +129,57 @@ def test_setup_copilot_acp_skips_same_provider_pool_step(tmp_path, monkeypatch):
     assert config.get("credential_pool_strategies", {}) == {}
 
 
+def test_model_flow_copilot_acp_rerouted_offers_agent_models_not_github(
+    tmp_path, monkeypatch
+):
+    """A re-routed copilot-acp must offer the ACP agent's own models.
+
+    ``copilot-acp`` spawns whatever ``HERMES_COPILOT_ACP_COMMAND`` points at, so
+    once it is aimed at another agent (claude-agent-acp) the GitHub Copilot
+    catalog no longer describes it. The picker already handles this via
+    ``provider_model_ids``; this pins the setup wizard to the same list, and
+    fails loudly if it reaches for GitHub instead.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    from hermes_cli import model_setup_flows
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    monkeypatch.setattr("hermes_cli.models._copilot_acp_is_rerouted", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.auth.get_external_process_provider_status",
+        lambda provider_id: {"resolved_command": "node claude-acp-run.js"},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_external_process_provider_credentials",
+        lambda provider_id: {"base_url": "acp://copilot"},
+    )
+
+    def _no_github(*args, **kwargs):
+        raise AssertionError("re-routed copilot-acp must not query GitHub Copilot")
+
+    monkeypatch.setattr("hermes_cli.models.fetch_github_model_catalog", _no_github)
+    monkeypatch.setattr("hermes_cli.models.normalize_copilot_model_id", _no_github)
+
+    offered = {}
+
+    def fake_prompt_model_selection(model_list, **kwargs):
+        offered["list"] = list(model_list)
+        return model_list[0]
+
+    monkeypatch.setattr(
+        "hermes_cli.auth._prompt_model_selection", fake_prompt_model_selection
+    )
+    monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda selected: None)
+    monkeypatch.setattr("hermes_cli.auth.deactivate_provider", lambda: None)
+
+    model_setup_flows._model_flow_copilot_acp({}, current_model="claude-opus-4-8")
+
+    assert offered["list"] == _PROVIDER_MODELS["copilot-acp"]
+    assert load_config()["model"]["provider"] == "copilot-acp"
+
+
 def test_setup_summary_local_browser_unavailable_without_chromium(
     tmp_path, monkeypatch, capsys
 ):

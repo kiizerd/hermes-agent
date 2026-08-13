@@ -2009,8 +2009,10 @@ def _model_flow_copilot_acp(config, current_model=""):
     )
     from hermes_cli.models import (
         _PROVIDER_MODELS,
+        _copilot_acp_is_rerouted,
         fetch_github_model_catalog,
         normalize_copilot_model_id,
+        provider_model_ids,
     )
     from hermes_cli.config import load_config, save_config
 
@@ -2043,33 +2045,49 @@ def _model_flow_copilot_acp(config, current_model=""):
 
     effective_base = creds.get("base_url") or effective_base
 
+    # The provider spawns whatever HERMES_COPILOT_ACP_COMMAND points at, so
+    # GitHub's catalog only describes it while it is still Copilot. Re-routed
+    # (e.g. at claude-agent-acp) the ids come from the local static catalog --
+    # same source /model already uses via provider_model_ids(), so the setup
+    # wizard and the picker agree instead of offering two different lists.
+    rerouted = _copilot_acp_is_rerouted()
+
+    catalog: list[dict] = []
     catalog_api_key = ""
-    try:
-        catalog_creds = resolve_api_key_provider_credentials("copilot")
-        catalog_api_key = catalog_creds.get("api_key", "")
-    except Exception:
-        pass
 
-    catalog = fetch_github_model_catalog(catalog_api_key)
-    normalized_current_model = (
-        normalize_copilot_model_id(
-            current_model,
-            catalog=catalog,
-            api_key=catalog_api_key,
-        )
-        or current_model
-    )
-
-    if catalog:
-        model_list = [item.get("id", "") for item in catalog if item.get("id")]
-        print(f"  Found {len(model_list)} model(s) from GitHub Copilot")
-    else:
-        model_list = _PROVIDER_MODELS.get("copilot", [])
+    if rerouted:
+        model_list = [m for m in provider_model_ids(provider_id) if m]
+        normalized_current_model = current_model
         if model_list:
-            print(
-                "  ⚠ Could not auto-detect models from GitHub Copilot — showing defaults."
-            )
+            print(f"  Found {len(model_list)} model(s) for the re-routed ACP agent")
             print('    Use "Enter custom model name" if you do not see your model.')
+    else:
+        try:
+            catalog_creds = resolve_api_key_provider_credentials("copilot")
+            catalog_api_key = catalog_creds.get("api_key", "")
+        except Exception:
+            pass
+
+        catalog = fetch_github_model_catalog(catalog_api_key)
+        normalized_current_model = (
+            normalize_copilot_model_id(
+                current_model,
+                catalog=catalog,
+                api_key=catalog_api_key,
+            )
+            or current_model
+        )
+
+        if catalog:
+            model_list = [item.get("id", "") for item in catalog if item.get("id")]
+            print(f"  Found {len(model_list)} model(s) from GitHub Copilot")
+        else:
+            model_list = _PROVIDER_MODELS.get("copilot", [])
+            if model_list:
+                print(
+                    "  ⚠ Could not auto-detect models from GitHub Copilot — showing defaults."
+                )
+                print('    Use "Enter custom model name" if you do not see your model.')
 
     if model_list:
         selected = _prompt_model_selection(
@@ -2089,14 +2107,18 @@ def _model_flow_copilot_acp(config, current_model=""):
         print("No change.")
         return
 
-    selected = (
-        normalize_copilot_model_id(
-            selected,
-            catalog=catalog,
-            api_key=catalog_api_key,
+    # normalize_copilot_model_id maps aliases onto GitHub ids; a Claude alias
+    # ("opus", "claude-fable-5[1m]") has no GitHub counterpart, and running it
+    # anyway would fire a pointless catalog fetch on every save.
+    if not rerouted:
+        selected = (
+            normalize_copilot_model_id(
+                selected,
+                catalog=catalog,
+                api_key=catalog_api_key,
+            )
+            or selected
         )
-        or selected
-    )
     _save_model_choice(selected)
 
     cfg = load_config()

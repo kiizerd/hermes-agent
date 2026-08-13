@@ -3,6 +3,7 @@ import type { ThreadMessage } from '@assistant-ui/react'
 import type { QuickModelOption } from '@/app/chat/composer/types'
 import type { ClientSessionState, CommandDispatchResponse } from '@/app/types'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
+import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
 import { type ChatMessage, type ChatMessagePart, chatMessageText, textPart } from '@/lib/chat-messages'
 import { normalize } from '@/lib/text'
 import type { ComposerAttachment } from '@/store/composer'
@@ -32,6 +33,7 @@ export function createClientSessionState(
     serviceTier: '',
     fast: false,
     yolo: false,
+    acpPermission: EMPTY_ACP_PERMISSION,
     personality: '',
     busy: false,
     awaitingResponse: false,

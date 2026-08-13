@@ -1,12 +1,13 @@
 import { computed, type ReadableAtom } from 'nanostores'
 import { createContext, useContext } from 'react'
 
-import type { ClientSessionState } from '@/app/types'
+import type { AcpPermissionState, ClientSessionState } from '@/app/types'
 import type { ChatMessage } from '@/lib/chat-messages'
 import {
   $activeSessionId,
   $awaitingResponse,
   $busy,
+  $currentAcpPermission,
   $currentCwd,
   $currentFastMode,
   $currentModel,
@@ -58,6 +59,8 @@ export interface SessionView {
   $provider: ReadableAtom<string>
   $fast: ReadableAtom<boolean>
   $reasoningEffort: ReadableAtom<string>
+  /** Claude-over-ACP permission mode for THIS surface (see AcpPermissionState). */
+  $acpPermission: ReadableAtom<AcpPermissionState>
 }
 
 /** The active session's own slice, or `undefined` while it's a draft. */
@@ -94,6 +97,7 @@ const $primaryBusy = computed([$primaryState, $busy, $selectedStoredSessionId], 
 
 export const PRIMARY_SESSION_VIEW: SessionView = {
   kind: 'primary',
+  $acpPermission: primaryField<AcpPermissionState>(state => state.acpPermission, $currentAcpPermission),
   $awaitingResponse: primaryField<boolean>(state => state.awaitingResponse, $awaitingResponse),
   $busy: $primaryBusy,
   $cwd: primaryField<string>(state => state.cwd, $currentCwd),

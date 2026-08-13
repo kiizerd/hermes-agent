@@ -171,6 +171,27 @@ export interface SidebarNavItem {
   keybindActionId?: string
 }
 
+/**
+ * Claude-over-ACP permission mode, mirrored from `session.info.acp_permission`.
+ *
+ * `available` is the pill's visibility gate and the ONLY thing the renderer may
+ * use for it. The `copilot-acp` provider is generic — it is Claude only when
+ * this machine reroutes it — and that reroute test lives in Python
+ * (`hermes_cli.models._copilot_acp_is_rerouted`). Re-deriving it here would be
+ * a second copy free to drift, so the backend decides and the renderer obeys.
+ */
+export interface AcpPermissionState {
+  available: boolean
+  /** Effective mode id, e.g. `plan`. Empty means "leave the agent as it is". */
+  value: string
+  /** Which rung of the ladder won: `env` | `session` | `config` | `agent`. */
+  source: string
+  /** An operator pinned `HERMES_ACP_PERMISSION_MODE`; the picker can't win. */
+  locked: boolean
+  /** Mode ids the agent advertised (or the known fallbacks before a session). */
+  options: string[]
+}
+
 export interface ClientSessionState {
   storedSessionId: string | null
   messages: ChatMessage[]
@@ -182,6 +203,7 @@ export interface ClientSessionState {
   serviceTier: string
   fast: boolean
   yolo: boolean
+  acpPermission: AcpPermissionState
   personality: string
   busy: boolean
   awaitingResponse: boolean

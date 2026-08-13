@@ -13,6 +13,7 @@ import { $wakeWord, toggleWakeWord } from '@/store/wake-word'
 import { ACTIVE_ICON_BTN, GHOST_ICON_BTN, PRIMARY_ICON_BTN } from './control-classes'
 import type { ConversationStatus } from './hooks/use-voice-conversation'
 import { ModelPill } from './model-pill'
+import { PermissionModePill } from './permission-mode-pill'
 import type { ChatBarState, VoiceStatus } from './types'
 import { VoiceMenu } from './voice-menu'
 
@@ -97,6 +98,10 @@ export function ComposerControls({
     />
   ) : (
     <>
+      {/* Renders null unless this session is Claude over ACP — see the gate in
+          PermissionModePill. Sits next to the model pill because it answers the
+          same class of question: what is this chat allowed to do. */}
+      <PermissionModePill compact={compactModelPill} disabled={disabled} />
       <DictationButton disabled={disabled} onToggle={onDictate} state={state.voice} status={voiceStatus} />
       <AutoSpeakButton active={autoSpeak} disabled={disabled} onToggle={onToggleAutoSpeak} />
       <WakeWordButton disabled={disabled} />

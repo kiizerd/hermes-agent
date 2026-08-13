@@ -275,6 +275,16 @@ def _(rid, params: dict) -> dict:
         if tier is None:
             tier = _load_service_tier()
         return _ok(rid, {"value": "fast" if tier == "priority" else "normal"})
+    if key == "permission_mode":
+        # Claude-over-ACP permission mode for ONE session. Reports the same
+        # block session.info publishes, so a surface that polls and a surface
+        # that listens can never disagree about `available` / `locked`.
+        session = _sessions.get(params.get("session_id", ""))
+        agent = (session or {}).get("agent")
+        provider = str(getattr(agent, "provider", "") or "").strip()
+        if not provider and isinstance((session or {}).get("model_override"), dict):
+            provider = str(session["model_override"].get("provider") or "").strip()
+        return _ok(rid, _acp_permission_mode_info(session, provider))
     if key == "busy":
         return _ok(rid, {"value": _load_busy_input_mode()})
     if key in {"approval_mode", "approvals.mode"}:

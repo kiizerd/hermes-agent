@@ -984,6 +984,39 @@ DEFAULT_CONFIG = {
         },
     },
 
+    # ACP subprocess provider ("copilot-acp"), including a re-routed one such
+    # as claude-agent-acp. These were HERMES_ACP_* environment variables; they
+    # are config keys so the options are visible and settable from `hermes
+    # config set` and the dashboard instead of hidden in .env. The matching
+    # env var still wins where one exists, so an operator override at launch
+    # time stays authoritative.
+    #
+    # NOTE: these are read once per ACP session, at session/new. With
+    # persistent sessions on (the default) an existing chat keeps the values
+    # it started with — a change lands on the next new session.
+    "copilot_acp": {
+        # Permission mode requested via session/set_mode. Empty leaves the
+        # agent on whatever mode it chose for itself, so nothing silently
+        # widens what may run without a human approving it.
+        # claude-agent-acp advertises: default, plan, acceptEdits,
+        # bypassPermissions. Env override: HERMES_ACP_PERMISSION_MODE.
+        "permission_mode": "",
+        # Reasoning display: "summarized" puts real thinking text on the wire,
+        # "omitted" streams signature-only blocks (blank Thought pane),
+        # "off" leaves the option unset entirely. Empty = "summarized".
+        # Env override: HERMES_ACP_THINKING_DISPLAY.
+        "thinking_display": "",
+        # Text appended to the agent's own system prompt.
+        "system_prompt_append": "",
+        # Tool-name allow / deny lists handed to the native agent, e.g.
+        # ["Bash(git status)", "Read"]. Empty = the agent's own defaults.
+        "allowed_tools": [],
+        "disallowed_tools": [],
+        # Extra directories the agent may read outside the working directory
+        # (the --add-dir equivalent).
+        "additional_directories": [],
+    },
+
     # Auxiliary model config — provider:model for each side task.
     # Format: provider is the provider name, model is the model slug.
     # "auto" for provider = auto-detect best available provider.

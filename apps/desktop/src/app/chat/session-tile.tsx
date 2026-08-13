@@ -32,6 +32,7 @@ import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { transcribeAudio } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { NEW_SESSION_TITLE, sessionTitle } from '@/lib/chat-runtime'
 import { createComposerAttachmentScope, draftTitleFor } from '@/store/composer'
@@ -89,6 +90,10 @@ function buildTileView(storedSessionId: string): SessionView {
 
   return {
     kind: 'tile',
+    // A tile NEVER falls back to the primary draft atom: its permission mode is
+    // this session's own, and borrowing the primary's would be exactly the
+    // cross-pane leak the session scoping exists to prevent.
+    $acpPermission: computed($state, state => state?.acpPermission ?? EMPTY_ACP_PERMISSION),
     $awaitingResponse: computed($state, state => Boolean(state?.awaitingResponse)),
     $busy: computed($state, state => Boolean(state?.busy)),
     $cwd: computed($state, state => state?.cwd ?? ''),

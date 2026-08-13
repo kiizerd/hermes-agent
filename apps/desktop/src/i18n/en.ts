@@ -2262,6 +2262,26 @@ export const en: Translations = {
     wakeWordListening: phrase => `Wake word: "${phrase}" — listening`,
     wakeWordOff: phrase => `Wake word: "${phrase}" — off`,
     wakeWordPausedVoice: phrase => `Wake word: "${phrase}" — paused during voice chat`,
+    permissionModeMenuTitle: 'Permission mode',
+    permissionModeTitle: mode => `Permission mode: ${mode}`,
+    permissionModeDraft: mode => `Permission mode: ${mode} — send a message to change it for this chat`,
+    permissionModeLocked: mode => `Permission mode: ${mode} — pinned by HERMES_ACP_PERMISSION_MODE`,
+    permissionModeFailed: 'Could not change the permission mode',
+    permissionModeBypassTitle: 'Skip all approval prompts?',
+    permissionModeBypassWarning:
+      'The agent will run every tool without asking — including shell commands and file writes. This applies to this chat only.',
+    permissionModeLabels: {
+      default: 'Default',
+      plan: 'Plan',
+      acceptEdits: 'Accept edits',
+      bypassPermissions: 'Bypass'
+    },
+    permissionModeDescriptions: {
+      default: 'Ask before running tools.',
+      plan: 'Research and propose a plan; make no changes.',
+      acceptEdits: 'Apply file edits without asking. Other tools still prompt.',
+      bypassPermissions: 'Run everything without asking. Shell and writes included.'
+    },
     lookupLoading: 'Looking up…',
     lookupNoMatches: 'No matches.',
     lookupTry: 'Try',

@@ -409,3 +409,180 @@ def test_probe_skipped_for_custom_args_without_acp():
     with _patch("agent.copilot_acp_client.subprocess.run") as run_mock:
         assert _acp_supported("mycli", ["--custom-transport"]) is True
     run_mock.assert_not_called()
+
+
+# ── config mcp_servers forwarding ───────────────────────────────────
+
+
+def _forwarded(client, servers):
+    """Run _config_mcp_servers with a stubbed config layer."""
+    import hermes_cli.config as _cfg
+
+    with _patch.object(_cfg, "load_config_readonly", return_value={"mcp_servers": servers}):
+        return client._config_mcp_servers()
+
+
+def test_config_http_server_uses_http_shape(monkeypatch, tmp_path):
+    """acp-agent.js reads url/headers ONLY when type is http or sse, and
+    headers must be [{name, value}] pairs -- it runs Object.fromEntries over
+    them, so a plain dict yields garbage keys."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    entries = _forwarded(
+        _make_native_client(tmp_path),
+        {"wiki": {"url": "http://host/mcp", "headers": {"X-Key": "abc"}, "timeout": 60}},
+    )
+
+    assert entries == [
+        {
+            "name": "wiki",
+            "type": "http",
+            "url": "http://host/mcp",
+            "headers": [{"name": "X-Key", "value": "abc"}],
+        }
+    ]
+    # timeout has no ACP equivalent on either shape; passing it through would
+    # be a key the agent never reads.
+    assert "timeout" not in entries[0]
+
+
+def test_config_sse_transport_hint_is_honoured(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    entries = _forwarded(
+        _make_native_client(tmp_path),
+        {"s": {"url": "http://host/sse", "transport": "sse"}},
+    )
+    assert entries[0]["type"] == "sse"
+
+
+def test_config_stdio_server_omits_type_key(monkeypatch, tmp_path):
+    """Negative control for the http test: the stdio branch is
+    `else if (!("type" in server))`, so even type="stdio" drops the server."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    entries = _forwarded(
+        _make_native_client(tmp_path),
+        {"local": {"command": "srv", "args": ["--x"], "env": {"K": "v"}, "cwd": "/tmp"}},
+    )
+
+    assert entries == [
+        {
+            "name": "local",
+            "command": "srv",
+            "args": ["--x"],
+            "env": [{"name": "K", "value": "v"}],
+        }
+    ]
+    assert "type" not in entries[0]
+    # cwd is not read by the agent for stdio servers.
+    assert "cwd" not in entries[0]
+
+
+def test_config_stdio_always_emits_env_and_args(monkeypatch, tmp_path):
+    """A stdio server whose `env` key is absent reaches the SDK as
+    `env: undefined` and is silently never spawned -- no error, no log, the
+    tools just never appear. Measured on the wire: omitted 0/2, `env: []` 2/2
+    (probe_config_mcp.py). Emitting the empty list is what makes a
+    no-environment server actually start."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    entries = _forwarded(_make_native_client(tmp_path), {"bare": {"command": "srv"}})
+
+    assert entries == [{"name": "bare", "command": "srv", "args": [], "env": []}]
+
+
+def test_config_http_always_emits_headers(monkeypatch, tmp_path):
+    """Same always-emit rule as stdio env, for the same ternary reason."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    entries = _forwarded(_make_native_client(tmp_path), {"h": {"url": "http://h/mcp"}})
+
+    assert entries[0]["headers"] == []
+
+
+def test_config_command_beats_url(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    entries = _forwarded(
+        _make_native_client(tmp_path),
+        {"both": {"command": "srv", "url": "http://host/mcp"}},
+    )
+    assert "url" not in entries[0]
+    assert entries[0]["command"] == "srv"
+
+
+def test_config_unexpanded_env_ref_is_dropped(monkeypatch, tmp_path):
+    """hermes_cli.config keeps ${VAR} verbatim when the variable is missing.
+    Forwarding it sends the literal placeholder as the header value, which the
+    remote rejects as auth failure -- a config problem wearing a 401."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    client = _make_native_client(tmp_path)
+
+    leaked = {"w": {"url": "http://host/mcp", "headers": {"X-Key": "${MISSING_KEY}"}}}
+    assert _forwarded(client, leaked) == []
+
+    # Negative control: identical entry with the ref resolved is forwarded, so
+    # the empty result above is the guard firing and not the whole path
+    # being dead.
+    resolved = {"w": {"url": "http://host/mcp", "headers": {"X-Key": "real"}}}
+    assert len(_forwarded(client, resolved)) == 1
+
+
+def test_config_disabled_server_is_dropped(monkeypatch, tmp_path):
+    """config.py auto-disables MCP entries it flags during migration."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    client = _make_native_client(tmp_path)
+
+    assert _forwarded(client, {"w": {"url": "http://h/mcp", "enabled": False}}) == []
+    assert len(_forwarded(client, {"w": {"url": "http://h/mcp", "enabled": True}})) == 1
+
+
+def test_config_cannot_shadow_hermes_tools(monkeypatch, tmp_path):
+    """The agent keys servers by name, so a config entry called hermes-tools
+    would replace Hermes' own tool surface with an arbitrary endpoint."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    assert _forwarded(
+        _make_native_client(tmp_path), {"hermes-tools": {"url": "http://evil/mcp"}}
+    ) == []
+
+
+def test_config_servers_skipped_for_advisory_session(monkeypatch, tmp_path):
+    """Advisory sessions are tool-less by contract."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    client = CopilotACPClient(
+        api_key="copilot-acp",
+        base_url="acp://copilot",
+        acp_command="claude-agent-acp",
+        acp_args=[],
+        acp_cwd=str(tmp_path),
+        advisory=True,
+    )
+    assert _forwarded(client, {"w": {"url": "http://h/mcp"}}) == []
+
+
+def test_config_servers_skipped_for_restricted_review_fork(monkeypatch, tmp_path):
+    """The background memory/skill review fork is held to the hermes-tools
+    surface because its Hermes-side whitelist cannot reach tools the ACP
+    subprocess runs itself. A network MCP server there reopens that hole."""
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    client = _make_native_client(tmp_path)
+
+    with _patch.object(client, "_restrict_to_hermes_tools", return_value=True):
+        assert _forwarded(client, {"w": {"url": "http://h/mcp"}}) == []
+    # Negative control: same client, restriction off.
+    with _patch.object(client, "_restrict_to_hermes_tools", return_value=False):
+        assert len(_forwarded(client, {"w": {"url": "http://h/mcp"}})) == 1
+
+
+def test_config_servers_skipped_in_bridge_mode(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    client = _make_native_client(tmp_path, command="copilot", args=["--acp", "--stdio"])
+    assert _forwarded(client, {"w": {"url": "http://h/mcp"}}) == []
+
+
+def test_config_servers_opt_out(monkeypatch, tmp_path):
+    client = _make_native_client(tmp_path)
+    for value in ("off", "0", "false", "none"):
+        monkeypatch.setenv("HERMES_ACP_CONFIG_MCP", value)
+        assert _forwarded(client, {"w": {"url": "http://h/mcp"}}) == []
+
+
+def test_config_server_without_command_or_url_is_dropped(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
+    assert _forwarded(_make_native_client(tmp_path), {"w": {"description": "x"}}) == []
+    assert _forwarded(_make_native_client(tmp_path), {"w": "not-a-dict"}) == []

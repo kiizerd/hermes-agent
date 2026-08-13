@@ -2,8 +2,9 @@ import type { ConnectionState } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
 import { lastVisibleMessageIsUser } from '@/app/chat/thread-loading'
-import type { ContextSuggestion } from '@/app/types'
+import type { AcpPermissionState, ContextSuggestion } from '@/app/types'
 import type { HermesConnection } from '@/global'
+import { acpPermissionEquals, EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { activeConnectionScopeSuffix, rescopeConnectionScopedStores } from '@/lib/connection-scoped'
 import { persistBoolean, persistString, storedBoolean, storedString } from '@/lib/storage'
@@ -622,6 +623,13 @@ export const $currentFastMode = atom(storedBoolean(COMPOSER_FAST_KEY, false))
 // Persistence lives in the backend config (approvals.mode), so this is a plain
 // reflection of the truth the gateway reports rather than its own store.
 export const $yoloActive = atom(false)
+// Claude-over-ACP permission mode for the DRAFT composer (no runtime yet). A
+// live session renders from its own slice in $sessionStates; this is only the
+// fallback the primary view uses before the first turn creates one. Not
+// persisted: `available` is a property of the backend the draft will run
+// against, so a remembered value could paint a pill for a provider this
+// session isn't using.
+export const $currentAcpPermission = atom<AcpPermissionState>(EMPTY_ACP_PERMISSION)
 export const $currentCwd = atom(getRememberedWorkspaceCwd())
 
 // Which conversation the live `$currentCwd` is known to describe. Three
@@ -852,6 +860,14 @@ export const setCurrentFastMode = (next: Updater<boolean>) => {
 }
 
 export const setYoloActive = (next: Updater<boolean>) => updateAtom($yoloActive, next)
+
+export const setCurrentAcpPermission = (next: AcpPermissionState) => {
+  // session.info is a heartbeat: it re-reports this block on every turn edge.
+  // Skip the identical write so subscribers don't re-render for no change.
+  if (!acpPermissionEquals($currentAcpPermission.get(), next)) {
+    $currentAcpPermission.set(next)
+  }
+}
 
 /** Move the live workspace AND remember it as this backend's workspace.
  *

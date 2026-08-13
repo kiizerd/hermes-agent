@@ -1,3 +1,4 @@
+import { normalizeAcpPermission } from '@/lib/acp-permission'
 import type { GatewayEventPayload } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 
@@ -6,7 +7,16 @@ import type { ClientSessionState } from '../../../types'
 type SessionRuntimeStatePatch = Partial<
   Pick<
     ClientSessionState,
-    'branch' | 'cwd' | 'fast' | 'model' | 'personality' | 'provider' | 'reasoningEffort' | 'serviceTier' | 'yolo'
+    | 'acpPermission'
+    | 'branch'
+    | 'cwd'
+    | 'fast'
+    | 'model'
+    | 'personality'
+    | 'provider'
+    | 'reasoningEffort'
+    | 'serviceTier'
+    | 'yolo'
   >
 >
 
@@ -47,6 +57,15 @@ export function sessionInfoStatePatch(payload: GatewayEventPayload | undefined):
 
   if (typeof payload?.yolo === 'boolean') {
     patch.yolo = payload.yolo
+  }
+
+  // Only patch when the backend actually sent the block. An older backend
+  // omits it entirely, and writing the normalized "unavailable" default in that
+  // case would be indistinguishable from a real "this session isn't Claude" —
+  // which is fine for the pill, but it would also churn the session slice on
+  // every heartbeat.
+  if (payload?.acp_permission !== undefined) {
+    patch.acpPermission = normalizeAcpPermission(payload.acp_permission)
   }
 
   return patch

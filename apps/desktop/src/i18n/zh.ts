@@ -2447,6 +2447,25 @@ export const zh: Translations = {
     wakeWordListening: phrase => `唤醒词:"${phrase}" — 正在监听`,
     wakeWordOff: phrase => `唤醒词:"${phrase}" — 已关闭`,
     wakeWordPausedVoice: phrase => `唤醒词:"${phrase}" — 语音对话期间暂停`,
+    permissionModeMenuTitle: '权限模式',
+    permissionModeTitle: mode => `权限模式:${mode}`,
+    permissionModeDraft: mode => `权限模式:${mode} — 发送消息后即可为本次对话更改`,
+    permissionModeLocked: mode => `权限模式:${mode} — 已由 HERMES_ACP_PERMISSION_MODE 固定`,
+    permissionModeFailed: '无法更改权限模式',
+    permissionModeBypassTitle: '跳过所有审批提示?',
+    permissionModeBypassWarning: '代理将不再询问即可运行任何工具,包括 shell 命令和文件写入。仅对本次对话生效。',
+    permissionModeLabels: {
+      default: '默认',
+      plan: '规划',
+      acceptEdits: '自动接受编辑',
+      bypassPermissions: '跳过审批'
+    },
+    permissionModeDescriptions: {
+      default: '运行工具前先询问。',
+      plan: '只做调研并提出方案,不做任何更改。',
+      acceptEdits: '直接应用文件编辑,其他工具仍会询问。',
+      bypassPermissions: '一切都不再询问,包括 shell 与文件写入。'
+    },
     lookupLoading: '查找中…',
     lookupNoMatches: '没有匹配项。',
     lookupTry: '试试',

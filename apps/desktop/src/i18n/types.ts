@@ -1921,6 +1921,17 @@ export interface Translations {
     wakeWordListening: (phrase: string) => string
     wakeWordOff: (phrase: string) => string
     wakeWordPausedVoice: (phrase: string) => string
+    permissionModeMenuTitle: string
+    permissionModeTitle: (mode: string) => string
+    permissionModeDraft: (mode: string) => string
+    permissionModeLocked: (mode: string) => string
+    permissionModeFailed: string
+    permissionModeBypassTitle: string
+    permissionModeBypassWarning: string
+    /** Mode id -> short label. Unknown ids fall back to the raw id. */
+    permissionModeLabels: Record<string, string>
+    /** Mode id -> one-line explanation shown under the label in the menu. */
+    permissionModeDescriptions: Record<string, string>
     lookupLoading: string
     lookupNoMatches: string
     lookupTry: string

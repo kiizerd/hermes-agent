@@ -7,9 +7,14 @@ bundle — an edit is not evidence.
 
 ## Probe harnesses
 
-They live at `~/.hermes-acp/` (outside the repo, because they carry machine
-paths and drive the real agent binary). Each one runs standalone with
+They live at `~/.hermes-acp/` (outside the repo, because they hardcode machine
+paths and spawn tripwire servers). Each one runs standalone with
 `venv/Scripts/python.exe`.
+
+The **launcher** that used to sit beside them is a different thing and is now
+tracked at [`claude-acp/claude-acp-run.js`](../../claude-acp/claude-acp-run.js).
+It carries no machine paths, so the reason the probes stay out never applied to
+it.
 
 Two families:
 

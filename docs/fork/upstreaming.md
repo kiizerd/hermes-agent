@@ -36,7 +36,8 @@ key off.
 |---|---|
 | `Claude Sub ACP` provider label | Ours. Upstream's generic label is correct for upstream |
 | Opus 4.8 catalog entry + `model-status-label` map entry | Machine-specific model set |
-| Anything reading `~/.hermes-acp/` | Local wrapper and probes |
+| `claude-acp/claude-acp-run.js` | Tracked in-repo, but ours: it exists only because `copilot-acp` is rerouted at a machine, and upstream has no such reroute |
+| The probe harnesses under `~/.hermes-acp/` | Machine paths and tripwire servers; deliberately untracked |
 
 **Do not** write a general dash-to-dot rule in `displayModelName` to avoid the
 explicit map entry. It cannot distinguish a version tail from a name

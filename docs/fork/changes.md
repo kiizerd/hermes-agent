@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **53 files, +5,137 / −282**.
+against the merge base: **67 files, +7,782 / −282**.
 
 Last verified against `upstream/main` at `423f92e607d` (2026-08-13). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -136,6 +136,51 @@ expanded (`load_config_readonly`, not `read_raw_config`) or the entry is dropped
 a config entry cannot shadow `hermes-tools`. Kill switch:
 `HERMES_ACP_CONFIG_MCP=off`.
 
+### `69b6454` — memory/skill standing instructions, and the Bridge pill
+
+Two related pieces, both about who owns the ACP session's system prompt. They
+interleave in `_build_session_meta`, so they landed together.
+
+**1. Memory/skill standing instructions.** `_HERMES_MEMORY_INSTRUCTIONS` +
+`_hermes_system_prompt_append()` name the `mcp__hermes-tools__*` tools in
+`_meta.systemPrompt.append`, so the agent stops satisfying "remember that" from
+its own memory directory — a store Hermes cannot read. Config:
+`copilot_acp.hermes_memory_instructions` (default true). Suppressed for
+advisory sessions, kept for the restricted review fork. See
+[`surfaces.md`](surfaces.md).
+
+**2. Bridge/native system-prompt mode.** A composer pill that switches the
+session between riding on Claude Code's preset (`bridge`) and replacing it with
+Hermes' own full system prompt (`native`). Config default
+`copilot_acp.system_prompt_mode`; per-session pick on the client
+(`set_system_prompt_mode` / `system_prompt_mode_state`), published as
+`acp_system_prompt_mode` on `session.info`, written through gateway
+`config.set`.
+
+Four things here that are not obvious from the shape, each of which was a bug
+first:
+
+- **Native is a plain string, and a string replaces the preset.** The SDK
+  accepts both shapes and errors on neither, so the wrong one boots clean and
+  degrades silently. Now pinned in [`wire-contracts.md`](wire-contracts.md).
+- **Native has no `append` channel**, so the memory block and the operator's
+  `system_prompt_append` are concatenated rather than dropped. Dropping them
+  cost native mode the block that maps bare tool names onto
+  `mcp__hermes-tools__*` — the mode that needs it most.
+- **Hermes' prompt describes Hermes' toolset, which is not this session's.**
+  `_NATIVE_TOOL_NAME_MAPPING` reconciles: `EXPOSED_TOOLS` crosses prefixed,
+  `terminal`/`read_file`/`write_file` do not cross at all and the agent's own
+  `Bash`/`Read`/`Write` cover that ground.
+- **The editable window is the draft, and only the draft.** `systemPrompt` is
+  sent once at `session/new` and has no re-send RPC, so `locked` goes true on
+  the first turn. The desktop parks the pick in `$draftAcpSystemPromptMode`
+  (sticky localStorage) and replays it in `createBackendSessionForSend`, in the
+  gap between `session.create` and the first prompt. Without that replay the
+  pill is unreachable in every state a user can actually get to.
+
+Excluded from native mode regardless of the pick: advisory sessions and the
+background memory/skill review fork.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -173,7 +218,10 @@ Where the fork touches upstream code, and what to check after a rebase.
 | File | Δ | Role |
 |---|---|---|
 | `app/chat/composer/permission-mode-pill.tsx` | +190 | The pill |
+| `app/chat/composer/bridge-mode-pill.tsx` | +150 | The Bridge/Native toggle. Editable on a draft, locked once the ACP session opens |
 | `lib/acp-permission.ts` | +95 | State shape, normalizer, `setSessionPermissionMode()` |
+| `lib/acp-system-prompt-mode.ts` | +95 | Same for bridge/native; `setSessionSystemPromptMode()` |
+| `app/session/hooks/use-session-actions/index.ts` | +25 | Replays the sticky draft pick onto the new session, before the first turn |
 | `app/types.ts` | +22 | `AcpPermissionState` |
 | `i18n/en.ts`, `zh.ts`, `types.ts` | +50 | Pill strings |
 | `store/session.ts` | +17 / −1 | Per-view permission atom |
@@ -189,6 +237,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 |---|---|
 | `tests/agent/test_copilot_acp_approval_routing.py` | +530 |
 | `tests/agent/test_copilot_acp_client.py` | +270 / −1 |
+| `tests/agent/test_copilot_acp_system_prompt_mode.py` | +280 (bridge/native wire shape, exclusions, lock) |
 | `tests/agent/transports/test_hermes_tools_mcp_server.py` | +258 |
 | `tests/tools/test_memory_disk_sync.py` | +128 |
 | `tests/tools/test_approval_tool_allowlist.py` | +85 |

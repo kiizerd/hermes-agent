@@ -27,6 +27,7 @@ and Hermes' own tool surface handed back to the agent over MCP.
 | [`wire-contracts.md`](wire-contracts.md) | Exact ACP/SDK wire shapes, read off `acp-agent.js` or proven on the wire. Do not guess these |
 | [`verification.md`](verification.md) | The probe harnesses and the test set that gate the fork |
 | [`upstreaming.md`](upstreaming.md) | What should go to Nous, what stays local, and why |
+| [`todo.md`](todo.md) | Confirmed gaps not yet patched |
 
 The operational runbook — pull, rebase, rebuild, swap the locked binary — is the
 `hermes-fork-maintenance` skill at `~/.claude/skills/hermes-fork-maintenance/`.

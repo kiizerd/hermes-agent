@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { ChatBarState } from '@/app/chat/composer/types'
 import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
+import { EMPTY_ACP_SYSTEM_PROMPT_MODE } from '@/lib/acp-system-prompt-mode'
 import { $activeSessionId, $currentModel, setCurrentModel, setCurrentModelSource } from '@/store/session'
 
 import { ModelPill } from './model-pill'
@@ -89,6 +90,7 @@ describe('ModelPill per-surface model label', () => {
     const tileView: SessionView = {
       kind: 'tile',
       $acpPermission: atom(EMPTY_ACP_PERMISSION),
+      $acpSystemPromptMode: atom(EMPTY_ACP_SYSTEM_PROMPT_MODE),
       $awaitingResponse: atom(false),
       $busy: atom(false),
       $cwd: atom(''),

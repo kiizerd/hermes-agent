@@ -100,6 +100,32 @@ queries that must never reach a shell-pattern matcher.
 through `_meta`. The fork sends both; `_select_acp_model()` (`:445`) skips
 silently when a value is not advertised.
 
+**Those aliases carry no vendor prefix, and that breaks context resolution.**
+`get_model_context_length()` fuzzy-matches `DEFAULT_CONTEXT_LENGTHS` keys as
+substrings; `opus`/`sonnet`/`haiku` contain no `claude`, so every step of the
+chain missed and they landed on the 256K hard fallback while the real window is
+1M — a ~4x under-report on the context gauge, and a compressor that summarizes
+about three quarters of a conversation early. `claude-fable-5[1m]` and
+`claude-opus-4-8` were unaffected: they match by substring.
+
+Resolved at **step 5a0** of `get_model_context_length()`
+(`agent/model_metadata.py`), ahead of the GitHub Copilot `/models` branch —
+those aliases are claude-agent-acp's, not Copilot's, so that lookup can only
+miss on them. Step 5 is also before step 4's `api.anthropic.com` call, which
+keeps the alias path free of network I/O.
+
+The table (`_ACP_CLAUDE_ALIAS_CONTEXT`) is deliberately **separate** from
+`DEFAULT_CONTEXT_LENGTHS`, matched exactly and only for ACP providers. A bare
+`sonnet`/`haiku` key in the global dict would tie with the `claude` catch-all at
+6 characters, and the longest-key-first sort breaks that tie arbitrarily — a win
+for `sonnet` would promote every older Claude on *every* provider to 1M.
+
+An alias is a moving pointer at whatever the CLI resolves it to today, so the
+values are family floors and are never written to the on-disk context cache.
+`haiku` maps to the 200K catch-all rather than 1M on purpose: over-reporting
+lets a conversation grow past the real window and the API rejects the turn,
+whereas under-reporting only compresses early.
+
 ## Thinking
 
 Set via `_meta.claudeCode.options.thinking = {"type": "adaptive", "display": "summarized"}`.

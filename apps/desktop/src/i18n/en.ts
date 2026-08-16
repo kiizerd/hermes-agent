@@ -2282,6 +2282,15 @@ export const en: Translations = {
       acceptEdits: 'Apply file edits without asking. Other tools still prompt.',
       bypassPermissions: 'Run everything without asking. Shell and writes included.'
     },
+    bridgeModeBridgeLabel: 'Bridge',
+    bridgeModeNativeLabel: 'Native',
+    bridgeModeTitle: mode =>
+      mode === 'Native'
+        ? 'Native — running on Hermes’ own system prompt instead of Claude Code’s'
+        : 'Bridge — Hermes instructions appended onto Claude Code’s own system prompt',
+    bridgeModeDraft: mode => `${mode} — click to switch. Sending a message locks it in for this chat`,
+    bridgeModeLocked: mode => `${mode} — locked while this chat’s session is running`,
+    bridgeModeFailed: 'Could not change the system prompt mode',
     lookupLoading: 'Looking up…',
     lookupNoMatches: 'No matches.',
     lookupTry: 'Try',

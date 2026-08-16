@@ -9,6 +9,7 @@ import { useI18n } from '@/i18n'
 import { type ChatMessage, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
+import { setSessionSystemPromptMode } from '@/lib/acp-system-prompt-mode'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { normalizeChoices, setClarifyRequest } from '@/store/clarify'
 import { migrateSessionDraft } from '@/store/composer'
@@ -41,6 +42,7 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $draftAcpSystemPromptMode,
   $messages,
   $newChatWorkspaceTarget,
   $sessions,
@@ -512,6 +514,7 @@ export function useSessionActions({
         setSelectedStoredSessionId(stored)
         setSessionStartedAt(Date.now())
         const yoloArmed = $yoloActive.get()
+        const draftSystemPromptMode = $draftAcpSystemPromptMode.get().trim()
         const runtimeInfo = applyRuntimeInfo(created.info)
 
         if (runtimeInfo) {
@@ -522,6 +525,27 @@ export function useSessionActions({
         // session existed — apply it to the freshly created session.
         if (yoloArmed) {
           await setSessionYolo(requestGateway, created.session_id, true).catch(() => undefined)
+        }
+
+        // Same replay for the Claude-over-ACP bridge/native pick, and for this
+        // one it is the ONLY delivery path. `systemPrompt` is sent inside
+        // `session/new`, which the backend opens lazily on the first prompt —
+        // so this narrow gap, after session.create and before the turn below,
+        // is the last moment the pick can still land. Awaited deliberately:
+        // racing the prompt would open the ACP session on the old mode and
+        // lock it there.
+        //
+        // Rejected for every non-Claude provider (gateway returns 4002) and
+        // swallowed like the YOLO replay above, because a draft pick left over
+        // from a Claude chat is not an error worth a toast in a chat that has
+        // no such setting.
+        // Pushed whenever the store is non-empty, INCLUDING an explicit
+        // "bridge". The atom is empty until the user first clicks the pill, so
+        // an untouched draft still defers to `copilot_acp.system_prompt_mode`;
+        // once they have clicked, the pick has to be able to override a config
+        // default of `native` as well as one of `bridge`.
+        if (draftSystemPromptMode) {
+          await setSessionSystemPromptMode(created.session_id, draftSystemPromptMode).catch(() => undefined)
         }
 
         return created.session_id

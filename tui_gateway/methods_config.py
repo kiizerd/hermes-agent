@@ -285,6 +285,17 @@ def _(rid, params: dict) -> dict:
         if not provider and isinstance((session or {}).get("model_override"), dict):
             provider = str(session["model_override"].get("provider") or "").strip()
         return _ok(rid, _acp_permission_mode_info(session, provider))
+    if key == "acp_system_prompt_mode":
+        # Claude-over-ACP bridge/native mode for ONE session -- mirrors the
+        # permission_mode block immediately above, same reasoning: reports the
+        # exact block session.info publishes so a poller and a listener can
+        # never disagree.
+        session = _sessions.get(params.get("session_id", ""))
+        agent = (session or {}).get("agent")
+        provider = str(getattr(agent, "provider", "") or "").strip()
+        if not provider and isinstance((session or {}).get("model_override"), dict):
+            provider = str(session["model_override"].get("provider") or "").strip()
+        return _ok(rid, _acp_system_prompt_mode_info(session, provider))
     if key == "busy":
         return _ok(rid, {"value": _load_busy_input_mode()})
     if key in {"approval_mode", "approvals.mode"}:

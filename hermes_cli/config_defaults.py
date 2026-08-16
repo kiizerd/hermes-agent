@@ -1008,6 +1008,19 @@ DEFAULT_CONFIG = {
         "thinking_display": "",
         # Text appended to the agent's own system prompt.
         "system_prompt_append": "",
+        # Prepend Hermes' memory/skill standing instructions to that append.
+        # A native agent ships its own memory store and skill loader, both
+        # wired into its real system prompt; without this it satisfies
+        # "remember that" by writing somewhere Hermes cannot read. Set false
+        # to send only `system_prompt_append`.
+        "hermes_memory_instructions": True,
+        # "bridge": append Hermes' instructions onto the agent's own preset
+        # (Claude Code identity, tool-schema guidance, auto CLAUDE.md/env
+        # context all stay). "native": replace the preset outright with
+        # Hermes' own full system prompt (build_system_prompt), so the model
+        # runs as Hermes rather than as Claude Code. Per-session override via
+        # the composer's Bridge pill; this is only the default for new chats.
+        "system_prompt_mode": "bridge",
         # Tool-name allow / deny lists handed to the native agent, e.g.
         # ["Bash(git status)", "Read"]. Empty = the agent's own defaults.
         "allowed_tools": [],

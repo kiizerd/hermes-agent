@@ -11,6 +11,7 @@ import { $hudMode, closeHud } from '@/store/hud'
 import { $wakeWord, toggleWakeWord } from '@/store/wake-word'
 
 import { ACTIVE_ICON_BTN, GHOST_ICON_BTN, PRIMARY_ICON_BTN } from './control-classes'
+import { BridgeModePill } from './bridge-mode-pill'
 import type { ConversationStatus } from './hooks/use-voice-conversation'
 import { ModelPill } from './model-pill'
 import { PermissionModePill } from './permission-mode-pill'
@@ -102,6 +103,11 @@ export function ComposerControls({
           PermissionModePill. Sits next to the model pill because it answers the
           same class of question: what is this chat allowed to do. */}
       <PermissionModePill compact={compactModelPill} disabled={disabled} />
+      {/* Renders null unless this session is Claude over ACP — see the gate in
+          BridgeModePill. Sits next to permission mode: both answer "what is
+          this chat allowed to do", this one specifically "whose system prompt
+          is it running on". */}
+      <BridgeModePill compact={compactModelPill} disabled={disabled} />
       <DictationButton disabled={disabled} onToggle={onDictate} state={state.voice} status={voiceStatus} />
       <AutoSpeakButton active={autoSpeak} disabled={disabled} onToggle={onToggleAutoSpeak} />
       <WakeWordButton disabled={disabled} />

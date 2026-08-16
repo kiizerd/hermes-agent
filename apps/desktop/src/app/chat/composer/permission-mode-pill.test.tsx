@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import type { AcpPermissionState } from '@/app/types'
 import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
+import { EMPTY_ACP_SYSTEM_PROMPT_MODE } from '@/lib/acp-system-prompt-mode'
 
 import { PermissionModePill } from './permission-mode-pill'
 
@@ -44,6 +45,7 @@ function renderPill(state: AcpPermissionState, runtimeId: null | string = 'runti
   const view: SessionView = {
     kind: 'tile',
     $acpPermission: atom(state),
+    $acpSystemPromptMode: atom(EMPTY_ACP_SYSTEM_PROMPT_MODE),
     $awaitingResponse: atom(false),
     $busy: atom(false),
     $cwd: atom(''),

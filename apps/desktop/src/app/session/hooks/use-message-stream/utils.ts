@@ -1,4 +1,5 @@
 import { normalizeAcpPermission } from '@/lib/acp-permission'
+import { normalizeAcpSystemPromptMode } from '@/lib/acp-system-prompt-mode'
 import type { GatewayEventPayload } from '@/lib/chat-messages'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 
@@ -8,6 +9,7 @@ type SessionRuntimeStatePatch = Partial<
   Pick<
     ClientSessionState,
     | 'acpPermission'
+    | 'acpSystemPromptMode'
     | 'branch'
     | 'cwd'
     | 'fast'
@@ -66,6 +68,10 @@ export function sessionInfoStatePatch(payload: GatewayEventPayload | undefined):
   // every heartbeat.
   if (payload?.acp_permission !== undefined) {
     patch.acpPermission = normalizeAcpPermission(payload.acp_permission)
+  }
+
+  if (payload?.acp_system_prompt_mode !== undefined) {
+    patch.acpSystemPromptMode = normalizeAcpSystemPromptMode(payload.acp_system_prompt_mode)
   }
 
   return patch

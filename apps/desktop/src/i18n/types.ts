@@ -1932,6 +1932,12 @@ export interface Translations {
     permissionModeLabels: Record<string, string>
     /** Mode id -> one-line explanation shown under the label in the menu. */
     permissionModeDescriptions: Record<string, string>
+    bridgeModeBridgeLabel: string
+    bridgeModeNativeLabel: string
+    bridgeModeTitle: (mode: string) => string
+    bridgeModeDraft: (mode: string) => string
+    bridgeModeLocked: (mode: string) => string
+    bridgeModeFailed: string
     lookupLoading: string
     lookupNoMatches: string
     lookupTry: string

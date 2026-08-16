@@ -597,6 +597,82 @@ def _acp_config_list(*keys: str) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
+# Hermes' memory, skills and session search reach a native ACP agent only
+# through the hermes-tools MCP server -- and Claude Code ships its OWN memory
+# directory and skill loader, both named in its real system prompt. Two
+# failure modes this text exists to defeat:
+#   1. Tool search. On a first-party host the agent withholds MCP tool schemas
+#      until a ToolSearch call fetches them, so `memory` and `skill_manage`
+#      arrive as bare names. A tool with no schema is a tool the model never
+#      spontaneously reaches for.
+#   2. Store confusion. When it does decide to remember something, the store
+#      wired into its own system prompt is the one it writes to, and that write
+#      lands where Hermes cannot read it.
+# This belongs in the system prompt rather than the prompt body: every `system`
+# message Hermes sends is rendered inside the "Conversation transcript:" block
+# by _render_prompt, where it reads as relayed context and loses to the agent's
+# actual system prompt.
+_HERMES_MEMORY_INSTRUCTIONS = """\
+Hermes memory and skills:
+- Hermes' persistent memory, skill library and cross-session search live in the
+  `hermes-tools` MCP server: `mcp__hermes-tools__memory`,
+  `mcp__hermes-tools__skill_manage`, `mcp__hermes-tools__skill_view`,
+  `mcp__hermes-tools__skills_list`, `mcp__hermes-tools__session_search`.
+- Those are the only stores Hermes can read. Your own built-in memory directory
+  and your own skill loader are a separate store the user is not looking at:
+  never satisfy a memory or skill request by writing there.
+- If one of those tool schemas is not loaded, fetch it before calling, e.g.
+  `ToolSearch` with `select:mcp__hermes-tools__memory,mcp__hermes-tools__skill_manage`.
+- Use them on your own initiative, without being asked, the same as any other
+  tool: save durable facts when the user states a preference or correction, and
+  save reusable procedures as skills after a task that was hard to get right."""
+
+
+def _hermes_system_prompt_append() -> str:
+    """The `_meta.systemPrompt.append` payload: fork instructions + operator text.
+
+    Ordering is deliberate. The operator's own `system_prompt_append` goes last
+    so it can override anything above it.
+    """
+    parts: list[str] = []
+    if _acp_config("hermes_memory_instructions", default=True):
+        parts.append(_HERMES_MEMORY_INSTRUCTIONS)
+    operator_text = _acp_config_str("system_prompt_append")
+    if operator_text:
+        parts.append(operator_text)
+    return "\n\n".join(parts)
+
+
+# Native mode reconciliation. build_system_prompt_parts renders its tool
+# guidance off `agent.valid_tool_names` -- Hermes' OWN toolset -- but the
+# session those tools reach is a Claude Code subprocess, and the two lists do
+# not line up in either direction:
+#   * Only the fixed allowlist in agent/transports/hermes_tools_mcp_server.py
+#     (EXPOSED_TOOLS) crosses the MCP boundary, and it arrives prefixed. So
+#     `web_search` in the prose is really `mcp__hermes-tools__web_search`.
+#   * Tools OUTSIDE that allowlist -- `terminal`, `read_file`, `write_file`,
+#     `delegate_task`, `computer_use`, `todo` -- are not renamed, they are
+#     absent. The subprocess covers that ground with its own native tools.
+# Tool SCHEMAS still arrive over the wire correctly either way, so calling is
+# not what breaks; what breaks is every sentence of prose that names a tool.
+# This block is the reconciliation, appended last so it is read as an
+# override of the guidance above it rather than a peer of it.
+_NATIVE_TOOL_NAME_MAPPING = """\
+Tool names in this prompt vs. the tools you actually have:
+- The tool list you were handed at session start is authoritative. Where it
+  disagrees with a tool name written above, the list wins -- the guidance above
+  is rendered from Hermes' own tool registry, which is not the same surface.
+- Hermes tools reach you through the `hermes-tools` MCP server and are prefixed
+  there: `web_search` above means `mcp__hermes-tools__web_search`, `memory`
+  means `mcp__hermes-tools__memory`, and so on for skills, session search,
+  browser control, vision and image generation.
+- Shell, file and code-search tools are the exception: Hermes' `terminal`,
+  `read_file` and `write_file` are NOT bridged and do not exist in this
+  session. Use your own native tools for that work -- Bash, Read, Write, Edit,
+  Glob, Grep. Do the same for anything else named above that is missing from
+  your tool list rather than reporting the task as blocked."""
+
+
 # Server names the bridge owns. A config entry using one of these would land in
 # the same `mcpServers[server.name]` slot on the agent side (acp-agent.js builds
 # a dict keyed by name, so the later entry silently wins) and could replace
@@ -1296,6 +1372,14 @@ class CopilotACPClient:
         # Hermes chat, not to the child process, so it must survive the session
         # rebuild that a model switch forces.
         self._mode_override: str = ""
+        # Per-session bridge/native system-prompt pick, set by the desktop
+        # composer's Bridge pill through set_system_prompt_mode(). Unlike
+        # _mode_override this has no live re-negotiation: systemPrompt is sent
+        # once, at session/new, and claude-agent-acp has no RPC to change it
+        # afterward. So this is only read up to the first _ensure_session call
+        # (self._session_id still empty); once a live session exists, further
+        # writes here are inert and the pill locks in the UI to match.
+        self._system_prompt_mode_override: str = ""
         # PromptResponse.usage from the most recent session/prompt result,
         # camelCase per claude-agent-acp's sessionUsage(). Read by the
         # completion builders after the turn settles; None when the agent
@@ -1404,6 +1488,105 @@ class CopilotACPClient:
             "options": advertised or list(_FALLBACK_ACP_MODE_IDS),
             "advertised": bool(advertised),
         }
+
+    def _effective_system_prompt_mode(self) -> str:
+        """"bridge" or "native" for this client -- session pick over config."""
+        override = (self._system_prompt_mode_override or "").strip().lower()
+        if override in ("bridge", "native"):
+            return override
+        configured = (_acp_config_str("system_prompt_mode") or "").strip().lower()
+        return configured if configured in ("bridge", "native") else "bridge"
+
+    def set_system_prompt_mode(self, mode: str) -> str:
+        """Pin this client's system-prompt mode; return the effective value.
+
+        Only meaningful before the first ``_ensure_session`` call -- see the
+        constructor comment on ``_system_prompt_mode_override``. Writing after
+        ``self._session_id`` is set is harmless but has no effect; callers
+        should check ``system_prompt_mode_state()["locked"]`` first, same
+        contract as the permission-mode pill.
+        """
+        self._system_prompt_mode_override = (mode or "").strip()
+        return self._effective_system_prompt_mode()
+
+    def system_prompt_mode_state(self) -> dict[str, Any]:
+        """Snapshot for the Bridge pill: effective value, source, lock state."""
+        if self._system_prompt_mode_override:
+            source = "session"
+        elif _acp_config_str("system_prompt_mode"):
+            source = "config"
+        else:
+            source = "default"
+        return {
+            "value": self._effective_system_prompt_mode(),
+            "source": source,
+            # Locked once session/new has actually fired -- there is no RPC to
+            # re-send systemPrompt, so a live session can never honour a later
+            # pick regardless of who makes it.
+            #
+            # Locked for the life of the ACP SESSION, not of the chat: anything
+            # that tears the subprocess down clears self._session_id (see
+            # _shutdown_process) and the next _ensure_session reads the pick
+            # fresh. A mid-chat model switch is the case that actually happens.
+            # That is the intended escape hatch, not a leak -- the reason for
+            # the lock is that a live session cannot be re-prompted, and after
+            # a rebuild there is no live session to contradict.
+            "locked": bool(self._session_id),
+            "options": ["bridge", "native"],
+        }
+
+    def _build_native_system_prompt(self) -> str:
+        """Full Hermes system prompt as a plain string for "native" mode.
+
+        A plain string REPLACES claude-agent-acp's claude_code preset outright
+        rather than appending to it (see the object-vs-string split in
+        ``_build_session_meta`` below) -- that's the whole point of native
+        mode: this session runs as Hermes, not as Claude Code wearing a
+        Hermes-flavoured append. Returns "" (caller falls back to bridge
+        mode) when the owning agent isn't resolvable yet, e.g. a client built
+        standalone in tests.
+
+        Built from ``build_system_prompt_parts`` rather than
+        ``build_system_prompt`` on purpose. The convenience wrapper stamps
+        ``agent._cached_system_prompt_static``, which is the reconstruction
+        anchor for Hermes' OWN prompt-cache accounting
+        (``reconstruct_static_prefix``). This string is never sent by Hermes
+        to a model API -- it goes out over ACP and the subprocess owns the
+        real request -- so writing it into that slot would seed the cache
+        bookkeeping with a prefix no Hermes request ever used. The join order
+        here mirrors the wrapper exactly; only the mutation is dropped.
+        """
+        agent = self._agent()
+        if agent is None:
+            return ""
+        try:
+            from agent.system_prompt import build_system_prompt_parts
+
+            parts = build_system_prompt_parts(agent)
+            base = "\n\n".join(
+                part for part in (parts["stable"], parts["context"], parts["volatile"]) if part
+            )
+        except Exception:
+            logger.debug("native system prompt build failed", exc_info=True)
+            return ""
+
+        if not base:
+            return ""
+
+        # Context-file truncation warnings are queued as a side effect of the
+        # build above. Drain them: this runs inside the first prompt's flow
+        # (_ensure_session is lazy), so the status channel is live and the
+        # user sees a truncated CLAUDE.md the same way a native chat would.
+        # Leaving them queued would strand them for the life of the process.
+        try:
+            from agent.system_prompt import drain_truncation_warnings
+
+            for warning in drain_truncation_warnings():
+                agent._emit_status(warning)
+        except Exception:
+            logger.debug("native prompt truncation warnings failed", exc_info=True)
+
+        return f"{base}\n\n{_NATIVE_TOOL_NAME_MAPPING}"
 
     def close(self) -> None:
         self._shutdown_process()
@@ -2030,14 +2213,56 @@ class CopilotACPClient:
         session_meta: dict[str, Any] = {}
         if claude_options:
             session_meta["claudeCode"] = {"options": claude_options}
-        # System prompt append. The OBJECT form is required: acp-agent.js locks
-        # type/preset to the claude_code preset and forwards the rest of the
-        # object, whereas a plain string REPLACES the preset outright and would
-        # strip the agent's own built-in instructions. This rides top-level
-        # _meta, not _meta.claudeCode.options.
-        append_text = _acp_config_str("system_prompt_append")
-        if append_text:
-            session_meta["systemPrompt"] = {"append": append_text}
+        # System prompt. The OBJECT form (append) is the normal case:
+        # acp-agent.js locks type/preset to the claude_code preset and forwards
+        # the rest of the object, so Claude Code's own identity, tool-schema
+        # guidance, and auto CLAUDE.md/env context all stay -- Hermes' text
+        # rides on top. This rides top-level _meta, not _meta.claudeCode.options.
+        # An advisory session gets no mcpServers at all, so naming hermes-tools
+        # in its system prompt would point at tools that cannot exist. The
+        # restricted background-review fork DOES keep hermes-tools and is
+        # exactly the caller that must write memories and skills, so it gets
+        # the full text.
+        #
+        # "native" mode is the deliberate exception: a plain STRING replaces
+        # the preset outright, so the session runs on Hermes' own system
+        # prompt instead of Claude Code's -- the Bridge pill's whole point.
+        #
+        # Two session kinds are excluded from native mode regardless of the
+        # pick, and for the same reason they are excluded from MCP forwarding
+        # above. An advisory session has no agent to build a Hermes prompt
+        # from and no tools to use one with. The background memory/skill
+        # review fork runs deliberately tool-starved against a harness prompt
+        # of its own; handing it the full Hermes operating brief -- coding
+        # posture, workspace snapshot, the whole skills index -- would talk
+        # over that harness and undo the narrowing on purpose.
+        native_prompt = ""
+        if (
+            not self._advisory
+            and not self._restrict_to_hermes_tools()
+            and self._effective_system_prompt_mode() == "native"
+        ):
+            native_prompt = self._build_native_system_prompt()
+
+        # The fork's own text (memory/skill standing instructions + the
+        # operator's `system_prompt_append`) applies in BOTH modes. Native
+        # mode has no `append` channel -- the whole value is one string --
+        # so it is concatenated instead, last, keeping the same
+        # operator-overrides-everything ordering the append path has. Losing
+        # it here would be a silent regression: the memory block is what maps
+        # Hermes' bare tool names onto `mcp__hermes-tools__*`, and native mode
+        # is the mode that needs that mapping most.
+        extra_text = (
+            _acp_config_str("system_prompt_append")
+            if self._advisory
+            else _hermes_system_prompt_append()
+        )
+        if native_prompt:
+            session_meta["systemPrompt"] = (
+                f"{native_prompt}\n\n{extra_text}" if extra_text else native_prompt
+            )
+        elif extra_text:
+            session_meta["systemPrompt"] = {"append": extra_text}
         if session_meta:
             session_params["_meta"] = session_meta
         session = self._rpc(

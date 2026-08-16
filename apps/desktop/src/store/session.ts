@@ -2,9 +2,10 @@ import type { ConnectionState } from '@hermes/shared'
 import { atom, computed } from 'nanostores'
 
 import { lastVisibleMessageIsUser } from '@/app/chat/thread-loading'
-import type { AcpPermissionState, ContextSuggestion } from '@/app/types'
+import type { AcpPermissionState, AcpSystemPromptModeState, ContextSuggestion } from '@/app/types'
 import type { HermesConnection } from '@/global'
 import { acpPermissionEquals, EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
+import { acpSystemPromptModeEquals, EMPTY_ACP_SYSTEM_PROMPT_MODE } from '@/lib/acp-system-prompt-mode'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { activeConnectionScopeSuffix, rescopeConnectionScopedStores } from '@/lib/connection-scoped'
 import { persistBoolean, persistString, storedBoolean, storedString } from '@/lib/storage'
@@ -28,6 +29,7 @@ const COMPOSER_PROVIDER_KEY = 'hermes.desktop.composer.provider'
 const COMPOSER_MODEL_SOURCE_KEY = 'hermes.desktop.composer.model-source'
 const COMPOSER_EFFORT_KEY = 'hermes.desktop.composer.reasoning-effort'
 const COMPOSER_FAST_KEY = 'hermes.desktop.composer.fast'
+const COMPOSER_ACP_SYSTEM_PROMPT_MODE_KEY = 'hermes.desktop.composer.acp-system-prompt-mode'
 
 // The last chat the user had open, so a relaunch lands back on it instead of an
 // empty new-chat. Stored (not runtime) id — the route is keyed by stored id.
@@ -630,6 +632,25 @@ export const $yoloActive = atom(false)
 // against, so a remembered value could paint a pill for a provider this
 // session isn't using.
 export const $currentAcpPermission = atom<AcpPermissionState>(EMPTY_ACP_PERMISSION)
+// Same fallback role as $currentAcpPermission above, for the Bridge pill
+// instead of the permission-mode pill.
+export const $currentAcpSystemPromptMode = atom<AcpSystemPromptModeState>(EMPTY_ACP_SYSTEM_PROMPT_MODE)
+// The bridge/native pick for a chat that does NOT exist yet, and the only
+// place the Bridge pill is editable.
+//
+// Permission mode needs no equivalent: it can be re-picked for the life of the
+// chat over `session/set_mode`, so its draft window is a convenience. This one
+// is sent once, inside `session/new`, and there is no RPC to resend it — by the
+// time a runtime id exists the ACP session has opened and the pick is frozen.
+// A draft-only store is therefore the feature, not an optimisation.
+//
+// Persisted, unlike the two mirrors above, and for the opposite reason: those
+// reflect a backend that a remembered value could misdescribe, while this is
+// the user's own intent for the next chat. Same sticky-composer contract as
+// model/effort/fast — a new chat FOLLOWS the last pick. Harmless when the next
+// chat turns out not to be Claude-over-ACP: the pill hides itself and the
+// backend rejects the key outright.
+export const $draftAcpSystemPromptMode = atom(storedString(COMPOSER_ACP_SYSTEM_PROMPT_MODE_KEY) ?? '')
 export const $currentCwd = atom(getRememberedWorkspaceCwd())
 
 // Which conversation the live `$currentCwd` is known to describe. Three
@@ -810,6 +831,11 @@ export const setCurrentProvider = (next: Updater<string>) => {
   persistString(COMPOSER_PROVIDER_KEY, $currentProvider.get() || null)
 }
 
+export const setDraftAcpSystemPromptMode = (next: Updater<string>) => {
+  updateAtom($draftAcpSystemPromptMode, next)
+  persistString(COMPOSER_ACP_SYSTEM_PROMPT_MODE_KEY, $draftAcpSystemPromptMode.get() || null)
+}
+
 export const getCurrentModelSource = (): ComposerModelSource => {
   const source = storedString(COMPOSER_MODEL_SOURCE_KEY)
 
@@ -866,6 +892,12 @@ export const setCurrentAcpPermission = (next: AcpPermissionState) => {
   // Skip the identical write so subscribers don't re-render for no change.
   if (!acpPermissionEquals($currentAcpPermission.get(), next)) {
     $currentAcpPermission.set(next)
+  }
+}
+
+export const setCurrentAcpSystemPromptMode = (next: AcpSystemPromptModeState) => {
+  if (!acpSystemPromptModeEquals($currentAcpSystemPromptMode.get(), next)) {
+    $currentAcpSystemPromptMode.set(next)
   }
 }
 

@@ -1328,7 +1328,17 @@ class CopilotACPClient:
         self._default_headers = dict(default_headers or {})
         self._acp_command = acp_command or command or _resolve_command()
         self._acp_args = list(acp_args or args or _resolve_args())
-        self._acp_cwd = str(Path(acp_cwd or os.getcwd()).resolve())
+        # `acp_cwd` is the project/workspace directory the ACP session should
+        # run in. When the caller passes one explicitly (tests, CLI overrides)
+        # we honour it. When it is omitted -- the normal gateway path -- the
+        # directory is resolved lazily at spawn time from the bound agent's
+        # session (see `_resolve_acp_cwd`): the desktop records the selected
+        # project's cwd on the session, and we must run Claude there rather
+        # than in the backend process's own launch directory. Storing the raw
+        # value (or None) keeps the laziness intact; only `_resolve_acp_cwd`
+        # materialises a final path.
+        self._acp_cwd_raw = acp_cwd
+        self._acp_cwd = self._resolve_acp_cwd()
         # Advisory (non-agentic) client: the MoA reference fan-out and other
         # pure text-in/text-out auxiliary calls. When set, the ACP session is
         # opened with an empty built-in tools array AND no hermes-tools MCP
@@ -1398,6 +1408,40 @@ class CopilotACPClient:
         self._agent_ref: "weakref.ref[Any] | None" = None
         _LIVE_CLIENTS.add(self)
 
+    def _resolve_acp_cwd(self) -> str:
+        """Materialise the working directory for the ACP child process.
+
+        Honours an explicit ``acp_cwd`` first. Otherwise fall back to the
+        session's recorded cwd -- the directory the user selected as their
+        project/workspace in the desktop -- looked up by the bound agent's
+        gateway session key. This is what makes a Claude ACP session start in
+        the chosen project rather than in the backend's launch directory.
+
+        The bound agent may not exist yet at construction time (the gateway
+        builds the client before ``bind_agent`` runs), so resolution is lazy
+        and re-run at every spawn (see ``_spawn_process``) to pick up a
+        mid-session project switch.
+        """
+        if self._acp_cwd_raw:
+            return str(Path(self._acp_cwd_raw).resolve())
+        agent = self._agent()
+        session_key = getattr(agent, "_gateway_session_key", None) or ""
+        if session_key:
+            try:
+                from tools.terminal_tool import get_session_cwd
+
+                cwd = get_session_cwd(session_key)
+                if cwd:
+                    return str(Path(cwd).resolve())
+            except Exception:
+                logger.debug(
+                    "acp cwd: could not read session cwd for %r",
+                    session_key,
+                    exc_info=True,
+                )
+        # Last resort: the backend process's own launch directory.
+        return str(Path(os.getcwd()).resolve())
+
     def bind_agent(self, agent: Any) -> None:
         """Attach the agent whose display callbacks tool activity routes to."""
         try:
@@ -1408,7 +1452,7 @@ class CopilotACPClient:
             self._agent_ref = None
 
     def _agent(self) -> Any:
-        ref = self._agent_ref
+        ref = getattr(self, "_agent_ref", None)
         return ref() if ref is not None else None
 
     def _restrict_to_hermes_tools(self) -> bool:
@@ -1836,6 +1880,10 @@ class CopilotACPClient:
                 f"to a working pair."
             )
 
+        # Re-resolve the cwd now that the agent is bound: the chosen project
+        # (session cwd) may have been set after construction, or switched
+        # mid-session, and the child must start in the current workspace.
+        self._acp_cwd = self._resolve_acp_cwd()
         try:
             # Hide the console the CLI child would otherwise flash on Windows
             # (#56747). Hide-only — stdio pipes stay intact for the ACP wire.

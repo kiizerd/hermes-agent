@@ -586,3 +586,86 @@ def test_config_server_without_command_or_url_is_dropped(monkeypatch, tmp_path):
     monkeypatch.delenv("HERMES_ACP_CONFIG_MCP", raising=False)
     assert _forwarded(_make_native_client(tmp_path), {"w": {"description": "x"}}) == []
     assert _forwarded(_make_native_client(tmp_path), {"w": "not-a-dict"}) == []
+
+
+# ── ACP session cwd resolves to the selected project (regression) ──
+
+def test_acp_cwd_falls_back_to_session_cwd(monkeypatch, tmp_path):
+    """When no explicit acp_cwd is given, the client must run the child in
+    the session's recorded working directory (the project the user picked in
+    the desktop), not in the backend process's launch directory.
+
+    Regression: acp_cwd was never propagated, so every Claude ACP session
+    started in os.getcwd() -- wherever the Hermes backend was launched.
+    """
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+
+    client = CopilotACPClient(
+        api_key="copilot-acp",
+        base_url="acp://copilot",
+        acp_command="claude-agent-acp",
+        acp_args=[],
+    )
+    assert client._acp_cwd_raw is None  # explicit cwd omitted
+
+    # Simulate the gateway having recorded the chosen project's cwd under the
+    # agent's gateway session key.
+    session_key = "agent:main:desktop:chat:1"
+
+    class _FakeAgent:
+        _gateway_session_key = session_key
+
+    agent = _FakeAgent()
+    client.bind_agent(agent)
+
+    captured = {}
+    with _patch(
+        "agent.copilot_acp_client.subprocess.Popen",
+        side_effect=_fake_popen_capture(captured),
+    ):
+        # get_session_cwd is imported lazily inside _resolve_acp_cwd.
+        with _patch(
+            "tools.terminal_tool.get_session_cwd",
+            return_value=str(project_dir),
+        ):
+            with pytest.raises(RuntimeError, match="Could not start Copilot ACP command"):
+                client._run_prompt("hello", timeout_seconds=1)
+
+    assert captured["kwargs"]["cwd"] == str(project_dir.resolve())
+
+
+def test_acp_cwd_explicit_overrides_session(monkeypatch, tmp_path):
+    """An explicit acp_cwd must win over the session cwd."""
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    client = CopilotACPClient(
+        api_key="copilot-acp",
+        base_url="acp://copilot",
+        acp_command="claude-agent-acp",
+        acp_args=[],
+        acp_cwd=str(explicit),
+    )
+
+    class _FakeAgent:
+        _gateway_session_key = "agent:main:desktop:chat:1"
+
+    agent = _FakeAgent()
+    client.bind_agent(agent)
+
+    captured = {}
+    with _patch(
+        "agent.copilot_acp_client.subprocess.Popen",
+        side_effect=_fake_popen_capture(captured),
+    ):
+        with _patch(
+            "tools.terminal_tool.get_session_cwd",
+            return_value=str(session_dir),
+        ):
+            with pytest.raises(RuntimeError, match="Could not start Copilot ACP command"):
+                client._run_prompt("hello", timeout_seconds=1)
+
+    assert captured["kwargs"]["cwd"] == str(explicit.resolve())

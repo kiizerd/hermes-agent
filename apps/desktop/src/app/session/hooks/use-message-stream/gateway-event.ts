@@ -11,6 +11,7 @@ import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals
 import { burstVibeHearts } from '@/components/chat/vibe-hearts'
 import { translateNow } from '@/i18n'
 import { normalizeAcpPermission } from '@/lib/acp-permission'
+import { normalizeAcpSystemPromptMode } from '@/lib/acp-system-prompt-mode'
 import { type GatewayEventPayload, textPart } from '@/lib/chat-messages'
 import { coerceGatewayText, coerceThinkingText, normalizePersonalityValue } from '@/lib/chat-runtime'
 import { playCompletionSound } from '@/lib/completion-sound'
@@ -65,6 +66,7 @@ import {
   $sessions,
   sessionMatchesStoredId,
   setCurrentAcpPermission,
+  setCurrentAcpSystemPromptMode,
   setCurrentBranch,
   setCurrentCwdTransient,
   setCurrentFastMode,
@@ -594,6 +596,10 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           // chat, which has no slice until its first turn.
           if (payload?.acp_permission !== undefined) {
             setCurrentAcpPermission(normalizeAcpPermission(payload.acp_permission))
+          }
+
+          if (payload?.acp_system_prompt_mode !== undefined) {
+            setCurrentAcpSystemPromptMode(normalizeAcpSystemPromptMode(payload.acp_system_prompt_mode))
           }
         }
 

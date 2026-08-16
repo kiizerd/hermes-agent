@@ -125,6 +125,60 @@ shows one `session/set_mode`, not two.
 Verified on the live wire: changing the mode on turn 2 emits `session/set_mode`
 and the session is **not** rebuilt.
 
+## System prompt: `append` object vs bare string
+
+`_meta.systemPrompt` rides **top-level** `_meta`, not `_meta.claudeCode.options`,
+and takes two shapes that are not variants of each other:
+
+| Sent | `claude-agent-acp` does | Result |
+|---|---|---|
+| `{"append": "…"}` | locks `type`/`preset` to the `claude_code` preset, forwards the rest | Claude Code's identity, tool-schema guidance, auto `CLAUDE.md` and env context all stay; Hermes' text rides on top |
+| `"…"` (plain string) | passes it through as the whole `systemPrompt` | preset **never loads**. The string IS the entire system prompt |
+
+**The SDK accepts both and errors on neither.** There is no 400, no log line,
+no validation failure. A session built with the wrong shape boots clean and then
+runs an agent with no identity, no tool-call format guidance and no repo
+context — visible only as degraded behaviour (prose instead of tool calls, a
+generic assistant voice, no awareness of cwd or git state).
+
+That silence is the whole reason this is a wire contract rather than a code
+detail. Bridge mode must use the object form. Native mode (the Bridge pill)
+uses the string form **on purpose** — replacing the preset is the feature — and
+carries its own replacements for what the preset provided:
+
+- Hermes' full system prompt from `build_system_prompt_parts` supplies identity
+  and operating guidance.
+- `_NATIVE_TOOL_NAME_MAPPING` (`copilot_acp_client.py`) supplies the tool
+  reconciliation, because Hermes' prompt names tools off its OWN registry. Only
+  the `EXPOSED_TOOLS` allowlist in
+  `agent/transports/hermes_tools_mcp_server.py` crosses the MCP boundary, and
+  it arrives prefixed `mcp__hermes-tools__*`; `terminal`, `read_file` and
+  `write_file` do not cross at all and the agent's own `Bash`/`Read`/`Write`
+  cover that ground.
+- `_hermes_system_prompt_append()` is **concatenated** rather than dropped —
+  native mode has no `append` channel, and losing it would take the memory/skill
+  block and the operator's `system_prompt_append` with it.
+
+There is **no RPC to resend `systemPrompt`.** Unlike permission mode (which has
+`session/set_mode`) this is negotiated once at `session/new` and is fixed for the
+life of that session. Any UI for it has to be a pre-session control; see the
+`locked` contract in [`surfaces.md`](surfaces.md).
+
+Pinned by `~/.hermes-acp/probe_system_prompt_mode.py` (17 checks offline, plus a
+`--live` arm that opens a real session in each mode).
+
+Proven on the live wire — same question, one session each:
+
+```
+bridge -> Claude Code, Sonnet 5 model, run in this repo terminal.
+native -> Hermes Agent, Nous Research make.
+```
+
+The identity flip is the evidence: it is not reachable by an `append`, only by
+actually replacing the preset. Note also that Claude Code's `SessionStart` hooks
+still fire in native mode — they are wired into the CLI, not into the preset —
+so hook-injected text survives a replacement that removes everything else.
+
 ## Tool suppression: MCP survives `tools: []`
 
 Handing the agent `tools: []` removes its built-ins (Bash, Read, Edit, Write) but

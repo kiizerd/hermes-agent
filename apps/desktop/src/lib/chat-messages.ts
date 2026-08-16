@@ -79,6 +79,9 @@ export type GatewayEventPayload = {
   // treat a malformed payload from an older/other backend as "unavailable"
   // rather than trusting a shape the compiler only assumed.
   acp_permission?: unknown
+  // session.info — Claude-over-ACP bridge/native system-prompt mode block.
+  // Same untyped-on-purpose reasoning as acp_permission above.
+  acp_system_prompt_mode?: unknown
   running?: boolean
   turn_started_at?: number | null
   cwd?: string

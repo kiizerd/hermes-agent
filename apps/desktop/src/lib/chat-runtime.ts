@@ -4,6 +4,7 @@ import type { QuickModelOption } from '@/app/chat/composer/types'
 import type { ClientSessionState, CommandDispatchResponse } from '@/app/types'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
+import { EMPTY_ACP_SYSTEM_PROMPT_MODE } from '@/lib/acp-system-prompt-mode'
 import { type ChatMessage, type ChatMessagePart, chatMessageText, textPart } from '@/lib/chat-messages'
 import { normalize } from '@/lib/text'
 import type { ComposerAttachment } from '@/store/composer'
@@ -34,6 +35,7 @@ export function createClientSessionState(
     fast: false,
     yolo: false,
     acpPermission: EMPTY_ACP_PERMISSION,
+    acpSystemPromptMode: EMPTY_ACP_SYSTEM_PROMPT_MODE,
     personality: '',
     busy: false,
     awaitingResponse: false,

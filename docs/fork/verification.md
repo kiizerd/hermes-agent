@@ -86,6 +86,7 @@ python -m pytest tests/acp/ \
   tests/agent/test_copilot_acp_client.py \
   tests/agent/test_copilot_acp_approval_routing.py \
   tests/agent/test_copilot_acp_usage.py \
+  tests/agent/test_acp_claude_alias_context.py \
   tests/agent/transports/test_hermes_tools_mcp_server.py \
   tests/tools/test_memory_disk_sync.py \
   tests/tools/test_approval_tool_allowlist.py \
@@ -145,6 +146,7 @@ Reading code is not evidence. Each feature has a specific observable:
 | Streaming order | First reasoning chunk index < first content chunk index |
 | Permission mode switch | `session/set_mode` on the wire at turn 2 **and** no session rebuild |
 | Config MCP forwarding | Tripwire server logs a spawn in the test arm, nothing in the `HERMES_ACP_CONFIG_MCP=off` control |
+| ACP alias context window | `get_model_context_length("opus", base_url="acp://copilot", provider="copilot-acp")` returns 1M, not 256K. The 256K value is `DEFAULT_FALLBACK_CONTEXT`, so "is it the fallback?" is the assertion — not the literal number |
 | Tool cards | User screenshot — there is no log for render |
 | Desktop fence fix / the pill | User screenshot |
 | Shipped bundle | md5 of the file extracted from `app.asar` vs `dist/assets/` |

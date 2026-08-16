@@ -436,6 +436,13 @@ DEFAULT_CONTEXT_LENGTHS = {
     "claude-sonnet-4.6": 1000000,
     # Catch-all for older Claude models (must sort after specific entries)
     "claude": 200000,
+    # NOTE: the bare Claude Code aliases ("opus", "sonnet", "haiku") are
+    # deliberately NOT in this dict — see _ACP_CLAUDE_ALIAS_CONTEXT below.
+    # Step 8 fuzzy-matches these keys as substrings, longest key first, and
+    # "sonnet"/"haiku" tie with "claude" at 6 characters. A bare "sonnet" key
+    # could therefore beat "claude" on that tie and promote every older Sonnet
+    # on every provider to 1M. Those aliases are provider-scoped and resolve in
+    # step 5a2 instead.
     # OpenAI — GPT-5 family (most have 400k; specific overrides first)
     # Source: https://developers.openai.com/api/docs/models
     # GPT-5.5 (launched Apr 23 2026) is 1.05M on the direct OpenAI API and
@@ -578,6 +585,53 @@ DEFAULT_CONTEXT_LENGTHS = {
     "mimo-v2-flash": 262144,
     "zai-org/GLM-5": 202752,
 }
+
+# Bare Claude Code aliases accepted by ``claude-agent-acp`` over ACP.
+#
+# The ``copilot-acp`` provider spawns whatever ``HERMES_COPILOT_ACP_COMMAND``
+# points at; locally that is claude-agent-acp, whose ``session/new``
+# configOptions advertise these short names rather than raw API ids (see
+# ``hermes_cli/models.py::_PROVIDER_MODELS["copilot-acp"]``). They carry no
+# vendor prefix, so the step-8 fuzzy match over DEFAULT_CONTEXT_LENGTHS misses
+# every one of them and they land on the 256K hard fallback — under-reporting a
+# 1M window by ~4x on the context gauge and making the compressor summarize
+# roughly three quarters of a conversation early.
+#
+# Kept OUT of DEFAULT_CONTEXT_LENGTHS on purpose: that dict is matched as
+# unanchored substrings across every provider, where a bare "sonnet"/"haiku"
+# would collide with the "claude" catch-all. Here the keys are matched EXACTLY
+# and only for ACP providers, so there is no shared namespace to poison.
+#
+# An alias tracks whatever the CLI currently points it at, so these are
+# floor-of-the-family values, not per-snapshot facts:
+#   opus / sonnet  -> Claude 5 generation, 1M
+#   haiku          -> Haiku 4.5 is 200K; deliberately NOT 1M, because
+#                     over-reporting lets the conversation grow past the real
+#                     window and the API rejects the turn. Under-reporting only
+#                     compresses early.
+#   opusplan       -> Opus for planning, Sonnet for execution; both 1M.
+_ACP_CLAUDE_ALIAS_CONTEXT: Dict[str, int] = {
+    "opus": 1_000_000,
+    "opusplan": 1_000_000,
+    "sonnet": 1_000_000,
+    "haiku": 200_000,
+}
+
+# Providers whose model names may be bare Claude Code aliases.
+_ACP_CLAUDE_ALIAS_PROVIDERS = frozenset({"copilot-acp", "claude-acp", "claude-code-acp"})
+
+
+def _resolve_acp_claude_alias_context(model: str, provider: str) -> Optional[int]:
+    """Context window for a bare Claude Code alias on an ACP provider.
+
+    Returns ``None`` for anything that is not an exact alias match, so a raw
+    API id (``claude-opus-4-8``) or a suffixed one (``claude-fable-5[1m]``)
+    keeps flowing through the normal resolution chain.
+    """
+    if (provider or "").strip().lower() not in _ACP_CLAUDE_ALIAS_PROVIDERS:
+        return None
+    return _ACP_CLAUDE_ALIAS_CONTEXT.get((model or "").strip().lower())
+
 
 # xAI Grok models that ACCEPT the `reasoning.effort` parameter on
 # api.x.ai. Verified live against /v1/responses 2026-05-10:
@@ -3062,6 +3116,20 @@ def get_model_context_length(
             inferred = _infer_provider_from_url(base_url)
             if inferred:
                 effective_provider = inferred
+
+    # 5a0. Bare Claude Code aliases on an ACP provider ("opus", "sonnet", …).
+    # Must precede 5a: those aliases are claude-agent-acp's, not GitHub
+    # Copilot's, so the Copilot /models lookup below can only miss on them, and
+    # every later step misses too (no vendor prefix to fuzzy-match), leaving the
+    # 256K hard fallback. Deliberately not persisted to the on-disk cache — an
+    # alias is a moving pointer at whatever the CLI resolves it to today.
+    _acp_alias_ctx = _resolve_acp_claude_alias_context(model, effective_provider)
+    if _acp_alias_ctx:
+        logger.debug(
+            "Context length %s for ACP alias %r (provider=%s)",
+            f"{_acp_alias_ctx:,}", model, effective_provider,
+        )
+        return _acp_alias_ctx
 
     # 5a. Copilot live /models API — max_prompt_tokens from the user's account.
     # This catches account-specific models (e.g. claude-opus-4.6-1m) that

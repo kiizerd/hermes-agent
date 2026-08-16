@@ -20,6 +20,7 @@ import {
   setSessionArchived
 } from '@/hermes'
 import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
+import { EMPTY_ACP_SYSTEM_PROMPT_MODE } from '@/lib/acp-system-prompt-mode'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $clarifyRequests, clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
 import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
@@ -1653,6 +1654,7 @@ describe('resumeSession failure recovery', () => {
           'runtime-stale',
           {
             acpPermission: EMPTY_ACP_PERMISSION,
+            acpSystemPromptMode: EMPTY_ACP_SYSTEM_PROMPT_MODE,
             awaitingResponse: false,
             branch: '',
             busy: false,

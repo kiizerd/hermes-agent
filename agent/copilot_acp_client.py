@@ -2870,6 +2870,12 @@ class CopilotACPClient:
                                 f"approval ({description}) but cron jobs run "
                                 "without a user present to approve it."
                             ),
+                            single_query_deny_message=(
+                                f"BLOCKED: Copilot tool call flagged for "
+                                f"approval ({description}) but single-query "
+                                "mode (-q) runs without a user present to "
+                                "approve it."
+                            ),
                             autoapprove_log_prefix="Copilot ACP tool call",
                             fail_closed_when_no_human=True,
                             no_human_block_message=(

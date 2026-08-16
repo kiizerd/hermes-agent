@@ -181,6 +181,33 @@ first:
 Excluded from native mode regardless of the pick: advisory sessions and the
 background memory/skill review fork.
 
+### `10d1317` — context window for bare Claude Code aliases
+
+`agent/model_metadata.py` +68, `tests/agent/test_acp_claude_alias_context.py`
++146 (new).
+
+The `copilot-acp` picker advertises claude-agent-acp's short aliases — `opus`,
+`sonnet`, `haiku` — which have no vendor prefix. `get_model_context_length()`
+fuzzy-matches its catalog as substrings, so none of them matched anything and
+all three fell to `DEFAULT_FALLBACK_CONTEXT` (256K) against a real 1M window.
+Observable as a 4x under-report on the desktop context gauge, and a compressor
+summarizing at roughly a quarter of the window. The two prefixed entries in the
+same picker (`claude-fable-5[1m]`, `claude-opus-4-8`) already resolved to 1M,
+which is why the bug read as "only some Claude models are wrong."
+
+`_ACP_CLAUDE_ALIAS_CONTEXT` is a separate exact-match table consulted at step
+5a0, before the GitHub Copilot `/models` branch. Rationale for keeping it out of
+`DEFAULT_CONTEXT_LENGTHS`, why `haiku` is 200K, and why the values are never
+cached to disk are in [`wire-contracts.md`](wire-contracts.md) §Model selection.
+
+The test file asserts the contract, not the numbers: aliases must not equal
+`DEFAULT_FALLBACK_CONTEXT`, frontier aliases must equal their concrete catalog
+entries, and every bare alias in the picker must have a table entry — so adding
+one to `_PROVIDER_MODELS["copilot-acp"]` without a context entry fails a test
+rather than silently reintroducing the fallback.
+
+Upstream-bound: the aliases and the resolver are both upstream code.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -192,6 +219,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `agent/copilot_acp_client.py` | +2023 / −156 | The fork. Native tool mode, sessions, streaming, permission gate, thinking, modes, MCP wiring |
 | `agent/transports/hermes_tools_mcp_server.py` | +126 / −11 | `memory`, `session_search`, `skill_manage` added to the exposed tool surface |
 | `agent/auxiliary_client.py` | +14 / −2 | Advisory (tool-less) client for `moa_reference`; task-keyed client cache |
+| `agent/model_metadata.py` | +68 | `_ACP_CLAUDE_ALIAS_CONTEXT` — context window for bare `opus`/`sonnet`/`haiku` aliases |
 | `agent/background_review.py` | +41 | INFO lifecycle logging; stamps `_acp_restrict_to_hermes_tools` |
 | `agent/agent_runtime_helpers.py` | +4 | `client.bind_agent(agent)` |
 | `agent/conversation_loop.py` | +14 / −9 | Stops excluding `copilot-acp` from streaming |

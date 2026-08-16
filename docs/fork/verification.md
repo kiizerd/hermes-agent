@@ -42,6 +42,23 @@ Two families:
 | `probe_mode_rpc.py` | module | The real registered `config.get` / `config.set permission_mode` handlers out of `tui_gateway.server._methods` — the exact calls the pill makes |
 | `probe_approval_routing.py` | module | Replays the `session/request_permission` branch through the real `tools.approval` gates; verifies per-target keying |
 | `probe_toolname_enrichment.py` | module | Replays frames captured from the live wire; does the toolName cache produce a narrow per-tool key? |
+| `probe_system_prompt_append.py` | module | The memory/skill standing-instructions block: normal, operator-override, opted-out and advisory arms |
+| `probe_system_prompt_mode.py` | both | Bridge vs native. 17 module checks (wire shape, native-keeps-the-append regression, advisory + restricted negative controls, lock semantics); `--live` opens a real session in each mode and asks the agent what it is |
+
+`probe_system_prompt_mode.py` is the one probe with both kinds in one file, and
+the split is the point. The module arm proves what Hermes **sends**; only
+`--live` proves what the agent **does** with it. That matters more here than
+elsewhere because the SDK accepts both `systemPrompt` shapes and errors on
+neither — see [`wire-contracts.md`](wire-contracts.md). `--live` costs tokens,
+so it is opt-in. It has been run and passes; the transcript is quoted in
+`wire-contracts.md`.
+
+Gotcha, and the reason the live arm nearly passed while testing nothing: a
+standalone probe client has no bound agent, so `_build_native_system_prompt()`
+returns `""` and native mode **falls back to bridge**. The live arm injects a
+stub prompt to force the string form onto the wire. Separately, the live arm
+must spawn `node.exe` with `claude-acp-run.js` as an argument — handing Popen
+the bare `.js` raises `WinError 193`.
 
 ### Writing a new probe
 

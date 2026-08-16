@@ -192,6 +192,41 @@ export interface AcpPermissionState {
   options: string[]
 }
 
+/**
+ * Claude-over-ACP bridge/native system-prompt mode, mirrored from
+ * `session.info.acp_system_prompt_mode`.
+ *
+ * "bridge" appends Hermes' instructions onto Claude Code's own preset
+ * (identity, tool-schema guidance, auto CLAUDE.md/env context all stay).
+ * "native" replaces the preset outright with Hermes' own full system prompt,
+ * so the session runs as Hermes rather than as Claude Code.
+ *
+ * Same gating contract as `AcpPermissionState`: `available` is the pill's
+ * visibility gate, decided backend-side. The one real difference from
+ * permission mode is `locked` — there is no ACP RPC to resend systemPrompt,
+ * so this locks the moment the live session opens, not just under an
+ * operator env pin.
+ */
+export interface AcpSystemPromptModeState {
+  available: boolean
+  /** `bridge` | `native`. Empty only when `available` is false. */
+  value: string
+  /** Which rung won: `session` | `config` | `default`. */
+  source: string
+  /**
+   * True once the live ACP session has opened.
+   *
+   * Scoped to the SESSION, not the chat. Anything that tears the ACP
+   * subprocess down — a mid-chat model switch is the realistic one — clears
+   * the backend's session id and this goes false again until the next turn
+   * reopens it. That is the intended escape hatch: the lock exists because a
+   * running session can't be re-prompted, and after a rebuild there is no
+   * running session to contradict.
+   */
+  locked: boolean
+  options: string[]
+}
+
 export interface ClientSessionState {
   storedSessionId: string | null
   messages: ChatMessage[]
@@ -204,6 +239,7 @@ export interface ClientSessionState {
   fast: boolean
   yolo: boolean
   acpPermission: AcpPermissionState
+  acpSystemPromptMode: AcpSystemPromptModeState
   personality: string
   busy: boolean
   awaitingResponse: boolean

@@ -98,6 +98,7 @@ python -m pytest tests/acp/ \
   tests/agent/test_copilot_acp_usage.py \
   tests/agent/test_acp_claude_alias_context.py \
   tests/agent/transports/test_hermes_tools_mcp_server.py \
+  tests/scripts/test_fork_signature_drift.py \
   tests/tools/test_memory_disk_sync.py \
   tests/tools/test_approval_tool_allowlist.py \
   tests/agent/test_empty_tool_name_loop_dampening.py \
@@ -114,6 +115,91 @@ cd apps/desktop && npx vitest run && npx tsc --noEmit
 different things: the canonical runner isolates per file, so it structurally
 cannot see cross-test `sys.modules` pollution. The same file set has been green
 under `run_tests.sh` and shown 11 failures under one-process pytest.
+
+## Signature drift — the break textual tooling cannot see
+
+`scripts/fork/signature_drift.py`. Fork-only, additive, no upstream file at
+that path.
+
+The problem it solves: on 2026-08-16 upstream `1596148ff22` added a required
+keyword-only `single_query_deny_message` to `_run_approval_gate`
+(`tools/approval.py`). Our caller is in `agent/copilot_acp_client.py` — a
+*different file* — so the rebase produced **zero conflict markers**, the
+merge-base overlap scout saw nothing, the `merge-tree` rehearsal was clean, the
+CRLF pass was clean, and the non-shell ACP approval branch shipped raising
+`TypeError`. No textual check can see that class of break.
+
+The tool walks the fork's own files, resolves every call into a first-party
+helper, rebuilds that helper's signature from source at a chosen revision, and
+asks CPython's own `Signature.bind` whether the call still fits.
+
+```bash
+python scripts/fork/signature_drift.py                        # is the fork broken NOW
+python scripts/fork/signature_drift.py --against upstream/main  # will pulling break it
+python scripts/fork/signature_drift.py --against upstream/main --show-info
+```
+
+Exit 1 on any BREAK. **Run the `--against` form before every pull** — that is
+the whole point; validate mode only tells you about damage already done.
+
+`tests/scripts/test_fork_signature_drift.py::test_the_real_fork_has_no_signature_drift_today`
+runs validate mode over the real fork files, so the gating set catches drift
+automatically once a rebase has landed.
+
+### What it checks
+
+| Shape | Verdict |
+|---|---|
+| upstream added a required param | BREAK — `missing a required argument` |
+| upstream removed a param we pass | BREAK — `unexpected keyword argument` |
+| upstream deleted the helper (present at merge base) | BREAK |
+| both sides changed one signature | BREAK — needs a human |
+| positional params reordered under a positional call | BREAK — *binds fine, means something else* |
+| upstream added an optional param | INFO (hidden unless `--show-info`) |
+| we added the helper / we changed it | silent — our hunk wins the rebase |
+| call splats `**kwargs` | silent for arity, still loud for a named unknown |
+
+### Three things that make it correct rather than plausible
+
+**It walks the whole AST, not `tree.body`.** The real call site imports
+`_run_approval_gate` *inside a function*. A module-level-only import index finds
+zero calls in that file and reports it clean.
+
+**It applies git's three-way rule, not a two-way diff.** "Does this exist at
+upstream" is the wrong question; "will this bind after I rebase onto upstream"
+is the right one, and a rebase carries our hunks across. Presence at the
+**merge base** is what separates *upstream deleted this* (break) from *we added
+this* (fine). Skipping that arm produced 10 BREAKs on the first real run, all
+false — every one a fork-only symbol. The same rule at signature level silences
+`CopilotACPClient(advisory=...)`, which upstream lacks because we added it.
+
+**It reconstructs a real `inspect.Signature` and calls `.bind()`.** Positional-only
+`/`, keyword-only `*`, defaults and varargs then behave exactly as the
+interpreter would, instead of as a hand-rolled approximation that drifts from
+CPython.
+
+### Traps hit while building it
+
+**`subprocess.run(text=True)` decodes with the *locale* codec.** cp1252 on this
+box. `tools/approval.py` has `→` in a docstring, so `git show` raised
+`UnicodeDecodeError` in the reader thread, the call reported failure, and the
+resolver concluded *"the file does not exist at that revision"* — confident,
+wrong output. Only the git path was affected; validate mode reads the working
+tree with an explicit `encoding="utf-8"` and looked perfectly healthy
+throughout. Read bytes, decode UTF-8 explicitly.
+
+**A display label is not a cache identity.** Signatures were cached under
+`SourceTree.label`, which is `rev or "working tree"` — so two trees differing
+only by root collided and every diff came back empty. Caught only because the
+tests compare two `tmp_path` roots, where both revs are `None`.
+
+**Proof it works is a reproduction, not a green run.** "No breaks" is also what
+a tool that checks nothing prints. The evidence is the pre-fix caller
+(`git show <fix>^:agent/copilot_acp_client.py`) bound against today's
+`tools/approval.py`, yielding exactly one finding:
+`missing a required argument: 'single_query_deny_message'`. Synthetic fixtures
+in the test file carry that shape forward; the historical SHAs are deliberately
+**not** pinned in a test, because a rebase rewrites every fork SHA.
 
 ### Known pre-existing failures — do not chase
 

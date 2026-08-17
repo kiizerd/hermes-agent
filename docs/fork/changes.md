@@ -285,6 +285,11 @@ Two ordering constraints, both load-bearing:
 
 Upstream-bound: yes. Any ACP provider wants the child in the session's project.
 
+**Shipped dead — completed by `e71ac8491b0`.** Nothing ever passed the
+`gateway_session_key` kwarg this reads, so the session lookup was skipped on
+every real session and the fallback to `os.getcwd()` still ran. Tests green,
+`git status` clean, and the only tell was the child's actual working directory.
+
 ### `8e4e132dad0` — pass `single_query_deny_message` to the approval gate
 
 `agent/copilot_acp_client.py` +6.

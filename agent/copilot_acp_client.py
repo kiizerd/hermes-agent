@@ -557,6 +557,23 @@ def _acp_mode_ids(session: Any) -> list[str]:
     return ids
 
 
+def _acp_current_mode_id(session: Any) -> str:
+    """The mode an ACP agent reported itself to be on in its session/new reply.
+
+    ``SessionModeState.currentModeId`` (see ``acp.schema``). This is ground truth
+    for what the agent DID, as against what we asked it for -- the two diverge
+    whenever ``_select_acp_mode`` finds the requested id unadvertised and leaves
+    the agent alone.
+    """
+    if not isinstance(session, dict):
+        return ""
+    modes = session.get("modes")
+    if not isinstance(modes, dict):
+        return ""
+    current = modes.get("currentModeId")
+    return current if isinstance(current, str) else ""
+
+
 def _acp_config(*keys: str, default: Any = None) -> Any:
     """Read one ``copilot_acp.*`` config value, or ``default`` on any miss.
 
@@ -1514,6 +1531,10 @@ class CopilotACPClient:
         ``options`` prefers the ids the live agent actually advertised over the
         static fallback, so a dropdown built against this can never offer a
         mode the agent would reject.
+
+        ``value`` is reconciled against those same ids once a session is live, so
+        the pair is always consistent: a UI can assume ``value`` is either one of
+        ``options`` or empty, and never a third thing it has no widget for.
         """
         env = (os.environ.get("HERMES_ACP_PERMISSION_MODE") or "").strip()
         if env:
@@ -1525,8 +1546,30 @@ class CopilotACPClient:
         else:
             source = "agent"
         advertised = _acp_mode_ids(self._session_info)
+        value = self._effective_acp_mode()
+        if advertised and value:
+            # Resolve what we ASKED for against what the agent advertises, using
+            # the same exact-then-case-insensitive ladder _select_acp_mode uses,
+            # so this can never disagree with what was actually sent.
+            match = next((v for v in advertised if v == value), None)
+            if match is None:
+                match = next((v for v in advertised if v.lower() == value.lower()), None)
+            if match is None:
+                # Unadvertised id (a typo in copilot_acp.permission_mode, an env
+                # pin for a different agent): _select_acp_mode logged and left the
+                # agent on its own mode, so report THAT. Publishing the requested
+                # value instead paints a dropdown with no option selected and a
+                # label the user cannot pick back to -- it looks like a missing
+                # mode rather than a rejected one.
+                value = _acp_current_mode_id(self._session_info)
+                source = "agent"
+            else:
+                # Also normalizes case: the UI's radio group matches ids exactly,
+                # so "Default" would have painted nothing selected even though
+                # _select_acp_mode applied it.
+                value = match
         return {
-            "value": self._effective_acp_mode(),
+            "value": value,
             "source": source,
             "locked": bool(env),
             "options": advertised or list(_FALLBACK_ACP_MODE_IDS),
@@ -1568,13 +1611,20 @@ class CopilotACPClient:
             # re-send systemPrompt, so a live session can never honour a later
             # pick regardless of who makes it.
             #
-            # Locked for the life of the ACP SESSION, not of the chat: anything
-            # that tears the subprocess down clears self._session_id (see
-            # _shutdown_process) and the next _ensure_session reads the pick
-            # fresh. A mid-chat model switch is the case that actually happens.
-            # That is the intended escape hatch, not a leak -- the reason for
-            # the lock is that a live session cannot be re-prompted, and after
-            # a rebuild there is no live session to contradict.
+            # This flag is scoped to the ACP SESSION, not to the chat, and it
+            # cannot be anything else: a client only knows about its own
+            # subprocess. Anything that tears that subprocess down clears
+            # self._session_id (see _shutdown_process) and this reads False
+            # again mid-chat -- a model switch being the case that actually
+            # happens.
+            #
+            # That is NOT the product-level contract, and reading this flag as
+            # "the user may pick again" is the bug it caused. The chat-scoped
+            # latch that governs the composer pill lives in
+            # tui_gateway/acp_session_modes.py (_SYSTEM_PROMPT_MODE_LATCH_SESSION_KEY)
+            # and ORs over this one: once a chat has taken a turn its pick is
+            # frozen for that chat's life, because a rebuilt session would
+            # otherwise splice a different system prompt into one transcript.
             "locked": bool(self._session_id),
             "options": ["bridge", "native"],
         }

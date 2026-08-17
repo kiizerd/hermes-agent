@@ -114,7 +114,8 @@ those aliases are claude-agent-acp's, not Copilot's, so that lookup can only
 miss on them. Step 5 is also before step 4's `api.anthropic.com` call, which
 keeps the alias path free of network I/O.
 
-The table (`_ACP_CLAUDE_ALIAS_CONTEXT`) is deliberately **separate** from
+The table (`ACP_CLAUDE_ALIAS_CONTEXT`, in the fork-only
+`agent/acp_alias_context.py`) is deliberately **separate** from
 `DEFAULT_CONTEXT_LENGTHS`, matched exactly and only for ACP providers. A bare
 `sonnet`/`haiku` key in the global dict would tie with the `claude` catch-all at
 6 characters, and the longest-key-first sort breaks that tie arbitrarily — a win
@@ -125,6 +126,13 @@ values are family floors and are never written to the on-disk context cache.
 `haiku` maps to the 200K catch-all rather than 1M on purpose: over-reporting
 lets a conversation grow past the real window and the API rejects the turn,
 whereas under-reporting only compresses early.
+
+Both directions of that separation are tested. Forward: every bare alias the
+picker advertises must have a table entry. Reverse: no alias may appear as a
+`DEFAULT_CONTEXT_LENGTHS` key. The reverse guard is two assertions, not one —
+a derived disjointness check cannot see an alias *migrated* out of the fork
+table into the fuzzy dict, since the two sets stay disjoint through exactly
+that change. A frozen literal tuple of the four names covers it.
 
 ## Thinking
 

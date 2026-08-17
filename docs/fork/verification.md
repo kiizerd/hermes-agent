@@ -157,6 +157,7 @@ Reading code is not evidence. Each feature has a specific observable:
 | Permission mode switch | `session/set_mode` on the wire at turn 2 **and** no session rebuild |
 | Config MCP forwarding | Tripwire server logs a spawn in the test arm, nothing in the `HERMES_ACP_CONFIG_MCP=off` control |
 | ACP alias context window | `get_model_context_length("opus", base_url="acp://copilot", provider="copilot-acp")` returns 1M, not 256K. The 256K value is `DEFAULT_FALLBACK_CONTEXT`, so "is it the fallback?" is the assertion — not the literal number |
+| Alias namespace guard | Mutation, not a green run — a guard that passes on unmutated code proves nothing. Insert `"sonnet"` into `DEFAULT_CONTEXT_LENGTHS` in memory: both reverse-invariant tests must fail. Then also pop `"sonnet"` from `ACP_CLAUDE_ALIAS_CONTEXT` (the migration case): the literal guard must still fail, the derived one passes — that asymmetry is why both exist |
 | Tool cards | User screenshot — there is no log for render |
 | Desktop fence fix / the pill | User screenshot |
 | Shipped bundle | md5 of the file extracted from `app.asar` vs `dist/assets/` |

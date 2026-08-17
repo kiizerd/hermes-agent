@@ -204,6 +204,26 @@ a tool that checks nothing prints. The evidence is the pre-fix caller
 in the test file carry that shape forward; the historical SHAs are deliberately
 **not** pinned in a test, because a rebase rewrites every fork SHA.
 
+### The other invisible break: right hunks, wrong order
+
+`tui_gateway/server.py` turn start — the one conflict pending against
+`upstream/main` as of 2026-08-17. Upstream `ea4310e76c2` and our ACP mode
+re-push both insert directly after `_sync_agent_model_with_config(sid, session)`
+in `_run_prompt_submit`, so git raises a single conflict between two pure
+insertions. Both sides are kept; the trap is which one goes first.
+
+`_sync_bot_capabilities()` ends in `session["agent"] = new_agent` — a full
+`_make_agent` rebuild — and upstream re-reads `agent = session["agent"]`
+immediately after it for exactly that reason. `apply_session_acp_modes(session)`
+resolves the agent through the session dict, so it must run **after** that
+rebuild or a Bot Chat turn runs on a fresh `agent.client` carrying no pinned
+permission or system-prompt mode. That is the hazard
+`acp_session_modes.py:330` already documents for a model switch, arriving from a
+second direction.
+
+Marker order — upstream block, then ours — is the correct resolution. Keep it,
+and do not reorder these by any other rule.
+
 ### Known pre-existing failures — do not chase
 
 Confirmed identical on a clean `upstream/main` worktree:

@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **69 files, +8,291 / −283**.
+against the merge base: **70 files, +8,459 / −283**.
 
 Last verified against `upstream/main` at `00c12dac613` (2026-08-16). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -268,8 +268,7 @@ Upstream-bound: yes. Any ACP provider wants the child in the session's project.
 
 ### `8e4e132dad0` — pass `single_query_deny_message` to the approval gate
 
-`agent/copilot_acp_client.py` +6. **Not yet committed** — assign a SHA and
-re-key this heading when it lands.
+`agent/copilot_acp_client.py` +6.
 
 Upstream `1596148ff22 fix(approval): deterministic approvals.single_query_mode
 for -q sessions` (2026-08-15) added a **required** keyword-only
@@ -295,6 +294,48 @@ swallowed the signature change.
 
 Upstream has the identical omission at its own `tools/file_tools.py:1005`
 (`ssh_config_write`) — untouched by the fork, so that one is upstream's to fix.
+
+### `d6559b01d4f` — move ACP session modes out of `tui_gateway/server.py`
+
+4 files, +492 / −366 (this commit's own diff). Measured against the merge base
+instead, `tui_gateway/server.py` goes from +371 to **+42**; its content lands in
+a new fork-only `tui_gateway/acp_session_modes.py` (+434).
+
+The first deliberate footprint reduction rather than a feature. `server.py` is
+the hottest file the fork touches by a wide margin — **485 upstream commits in
+90 days**, against 296 for `conversation_loop.py` and 14 for
+`copilot_acp_client.py`. Biggest patch is not the same as biggest risk, and
+`server.py` was carrying 371 fork lines into the file most likely to be rewritten
+underneath them.
+
+What moved: seven `_acp_*` helpers, three constants, and the two `config.set`
+arms. All of it purely additive — code upstream has no concept of. What stayed:
+four call sites (the import, a `**`-unpack in the `session.info` payload, one
+`apply_session_acp_modes()` at turn start, one delegation out of the `config.set`
+chain).
+
+**The import re-exports `_acp_permission_mode_info` and
+`_acp_system_prompt_mode_info` even though `server.py` no longer calls either.**
+That is load-bearing: `methods_config.py` handler bodies are rebound onto
+`server.py`'s globals at install time (`method_ctx.py`) and resolve those two
+names from there at call time, so dropping either import breaks `config.get`
+with a `NameError`. The new module imports nothing from `server.py` in return —
+`handle_acp_config_set()` takes `_ok` / `_err` / `_emit` / `_session_info` as
+injected arguments, because the reverse import would be a cycle.
+
+**The rule this follows, for the next extraction:** move code that is *additive*
+to upstream; leave code that *modifies* upstream's own logic where it is.
+Isolating a modification means overriding an upstream function, which trades a
+loud failure (a conflict marker you must resolve) for a silent one (your override
+shadows a future upstream bugfix with no signal). That is why
+`agent/conversation_loop.py` (+14 / −9, and those 9 deletions are upstream's own
+`elif`) and `agent/copilot_acp_client.py` (+2,306 / −157) stay put despite being
+the two largest remaining surfaces.
+
+Verified by `probe_mode_rpc.py` and `probe_session_mode_override.py` (both ALL
+PASS after being repointed at the new module), `tests/test_tui_gateway_server.py`
+(585 passed under `run_tests.sh`), and the gating set (811 passed, 1 pre-existing
+`test_ping_suppression` failure).
 
 ## File map
 
@@ -326,7 +367,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `hermes_cli/models.py` | +48 / −2 | `_copilot_acp_is_rerouted()`, Opus 4.8 entry |
 | `hermes_cli/providers.py`, `auth.py` | +1 / −1 each | Provider label `Claude Sub ACP` |
 | `plugins/model-providers/copilot-acp/__init__.py` | +2 / −2 | Plugin metadata |
-| `tui_gateway/server.py` | +371 | `acp_permission` on `session.info`; `config.set permission_mode`; per-turn mode apply |
+| `tui_gateway/server.py` | +42 | Call sites only — import (re-exports the two `_info` fns for `methods_config.py`), `session.info` unpack, turn-start apply, `config.set` delegation |
 | `tui_gateway/methods_config.py` | +21 | `config.get permission_mode` |
 
 ### Desktop (TypeScript — needs a rebuild to take effect)
@@ -371,6 +412,7 @@ Upstream has no file at these paths, so they can never conflict.
 
 | File | Δ | Role |
 |---|---|---|
+| `tui_gateway/acp_session_modes.py` | +434 | Permission-mode and bridge/native session modes: 7 helpers, 2 `config.set` arms, injected server helpers |
 | `claude-acp/claude-acp-run.js` | +126 | Windows launcher. Scrubbed-env allowlist; `ENABLE_TOOL_SEARCH=false`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |
 | `claude-acp/claude-acp-run.sh` | +102 | POSIX variant, held at parity |
 | `docs/fork/*.md` | — | This knowledge base |

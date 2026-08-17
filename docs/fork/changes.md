@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **70 files, +8,459 / −283**.
+against the merge base: **71 files, +8,610 / −283**.
 
 Last verified against `upstream/main` at `00c12dac613` (2026-08-16). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -337,6 +337,65 @@ PASS after being repointed at the new module), `tests/test_tui_gateway_server.py
 (585 passed under `run_tests.sh`), and the gating set (811 passed, 1 pre-existing
 `test_ping_suppression` failure).
 
+### `b9954f0bff3` — move the ACP alias context table into a fork-only module
+
+5 files, +169 / −78 (this commit's own diff). Against the merge base,
+`agent/model_metadata.py` goes from +68 to **+23**; the table lands in a new
+fork-only `agent/acp_alias_context.py` (+73).
+
+M3, and the second footprint reduction after `server.py`. `model_metadata.py`
+took **105 upstream commits in 90 days**, most of them appending to
+`DEFAULT_CONTEXT_LENGTHS` — the exact dict the fork's lines sat beside.
+
+What moved: the alias table, the ACP provider frozenset, the resolver, and the
+seven-line rationale comment that lived inside `DEFAULT_CONTEXT_LENGTHS`. What
+stayed is +23: a four-line import, a five-line pointer where the rationale was,
+and the fourteen-line step 5a0 branch. **The branch does not move, by rule** —
+it modifies an upstream function body, and isolating it would mean overriding
+`get_model_context_length()`, trading a conflict marker for an override that
+silently shadows a future upstream fix.
+
+Shortening the comment opened a gap worth naming, because it is the failure mode
+extraction creates. Two invariants govern this table; only the forward one was
+tested (every bare alias in the picker has an entry). The reverse — no alias may
+be added to `DEFAULT_CONTEXT_LENGTHS` — was held *by the prose that got cut*.
+That dict is substring-matched across every provider, and `sonnet`/`haiku` tie
+the `claude` catch-all at six characters, so one key there promotes every older
+Claude on Bedrock, Vertex and OpenRouter until the API starts rejecting turns.
+
+The guard is **two** assertions on purpose. Derived set-disjointness has no drift
+and covers aliases added later, but it is blind to a *migration*: moving an alias
+out of the fork table and into the fuzzy dict leaves the sets disjoint, so that
+check stays green while the bug returns. A frozen literal tuple of the four names
+catches it. Both were **mutation-tested, not merely run** — a guard that passes
+on unmutated code proves nothing. Injecting the naive add fails both; injecting
+the migration fails only the literal one, which is the evidence that they are two
+guards rather than one written twice.
+
+A blanket "no bare keys" rule was not available: `DEFAULT_CONTEXT_LENGTHS`
+legitimately carries 13 vendor-less catch-alls (`claude`, `grok`, `qwen`,
+`gemini`, …), so the guard distinguishes provenance, not spelling.
+
+No external probe reads these symbols — `grep` over `~/.hermes-acp/probe_*.py`
+returns nothing for all three — so unlike M1 there was no probe to repoint.
+Verified by the gating set (447 passed, 1 pre-existing `test_ping_suppression`)
+and `run_tests.sh` on the three touched files (148 passed, 0 failed).
+
+Also corrects a stale pointer: the old in-dict comment said step 5a2, the branch
+is step 5a0.
+
+**M2 was assessed and dropped, not deferred.** The i18n overlay (+72 across
+`apps/desktop/src/i18n/{en,zh,types}.ts`) cannot be done by declaration merging.
+`Translations` *is* an `interface`, so merging is legal, but the fork's keys are
+nested inside `composer` and merging a second `composer` member is `TS2717` —
+declaration merging does not deep-merge. Hoisting to a new top-level member
+instead fails `TS2741`, because `en.ts:5` and `zh.ts:5` are explicitly annotated
+`const … : Translations`, so any required merged key reads as a missing property.
+Both errors were reproduced with `tsc`, not reasoned about. The structural point
+outlives the TypeScript detail: **55 of the 72 lines are values, not types**
+(`types.ts` is +17; the rest is string literals), and declaration merging is a
+type-level tool with no mechanism for injecting runtime values.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -348,7 +407,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `agent/copilot_acp_client.py` | +2306 / −157 | The fork. Native tool mode, sessions, streaming, permission gate, thinking, modes, MCP wiring, project cwd |
 | `agent/transports/hermes_tools_mcp_server.py` | +126 / −11 | `memory`, `session_search`, `skill_manage` added to the exposed tool surface |
 | `agent/auxiliary_client.py` | +15 / −3 | Advisory (tool-less) client for `moa_reference`; task-keyed client cache |
-| `agent/model_metadata.py` | +68 | `_ACP_CLAUDE_ALIAS_CONTEXT` — context window for bare `opus`/`sonnet`/`haiku` aliases |
+| `agent/model_metadata.py` | +23 | Import + step 5a0 branch delegating to `agent/acp_alias_context.py` |
 | `agent/background_review.py` | +40 | INFO lifecycle logging; stamps `_acp_restrict_to_hermes_tools` |
 | `agent/agent_runtime_helpers.py` | +4 | `client.bind_agent(agent)` |
 | `agent/conversation_loop.py` | +14 / −9 | Stops excluding `copilot-acp` from streaming |
@@ -413,6 +472,7 @@ Upstream has no file at these paths, so they can never conflict.
 | File | Δ | Role |
 |---|---|---|
 | `tui_gateway/acp_session_modes.py` | +434 | Permission-mode and bridge/native session modes: 7 helpers, 2 `config.set` arms, injected server helpers |
+| `agent/acp_alias_context.py` | +73 | Context windows for bare Claude Code aliases: table, ACP provider set, exact-match resolver |
 | `claude-acp/claude-acp-run.js` | +126 | Windows launcher. Scrubbed-env allowlist; `ENABLE_TOOL_SEARCH=false`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |
 | `claude-acp/claude-acp-run.sh` | +102 | POSIX variant, held at parity |
 | `docs/fork/*.md` | — | This knowledge base |

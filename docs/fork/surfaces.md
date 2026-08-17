@@ -180,10 +180,21 @@ Resolution ladder, `_effective_acp_mode()` (`:1301`) then `_requested_acp_mode()
 
 Added in `tui_gateway/`. The desktop pill uses these; so can any other surface.
 
+**Implementation lives in `tui_gateway/acp_session_modes.py`**, a fork-only
+module — upstream has no file at that path, so it cannot conflict on a rebase.
+`server.py` keeps four call sites (~42 lines, down from 371) and re-exports
+`_acp_permission_mode_info` / `_acp_system_prompt_mode_info` by importing them.
+**That re-export is load-bearing:** `methods_config.py` handler bodies are
+rebound onto `server.py`'s globals at install time (`method_ctx.py`) and resolve
+those two names from there at call time, so dropping either import breaks
+`config.get`. The `config.set` arms are delegated to `handle_acp_config_set()`,
+which takes `_ok` / `_err` / `_emit` / `_session_info` as injected arguments —
+the module never imports `server.py`, because the reverse import would be a cycle.
+
 ### `session.info` → `acp_permission`
 
 Published on every `session.info`. Built by `_acp_permission_mode_info()`
-(`tui_gateway/server.py`).
+(`tui_gateway/acp_session_modes.py`).
 
 ```jsonc
 {

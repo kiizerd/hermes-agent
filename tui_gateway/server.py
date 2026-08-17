@@ -10822,9 +10822,11 @@ def _run_prompt_submit(
             # the turn runs. No-op for every other session shape.
             _sync_bot_capabilities(sid, session)
             agent = session["agent"]
-            # Re-push the session's pinned ACP modes. Must run AFTER the model
-            # sync above: a model switch rebuilds agent.client, so the fresh
-            # client knows nothing about a mode pinned on the old one.
+            # Re-push the session's pinned ACP modes. Must run AFTER BOTH
+            # rebuild sources above: a model switch rebuilds agent.client, and
+            # _sync_bot_capabilities replaces session["agent"] outright, so a
+            # fresh client knows nothing about a mode pinned on the old one.
+            # Do not hoist this call above either of them.
             apply_session_acp_modes(session)
             # Snapshot after turn-start model sync. A deferred switch mutates
             # history and its version; that mutation belongs to this turn.

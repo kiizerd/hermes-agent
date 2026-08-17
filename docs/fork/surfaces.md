@@ -104,9 +104,20 @@ The difference from permission mode is the one that shapes the UI. There is no
 
 - `locked` goes true the moment `session/new` fires, and `config.set` **rejects**
   the write rather than pocketing a pick that can never take effect.
-- `locked` is scoped to the ACP **session**, not the chat. Anything that tears
-  the subprocess down clears `_session_id` and reopens the window — a mid-chat
-  model switch is the realistic case, and that is the intended escape hatch.
+- `locked` as published is scoped to the **chat**, and is a hard latch: once a
+  chat has taken one turn its pick is frozen for that chat's life, model
+  switches included. Starting a new chat is the only escape hatch.
+- Two locks are OR'd to get there, and the distinction is the whole bug.
+  `CopilotACPClient.system_prompt_mode_state()["locked"]` is `bool(_session_id)`
+  — the ACP **subprocess's** lifetime, which is all a client can speak for.
+  `_shutdown_process` clears that id on a model switch, a transcript
+  divergence, and a failed resync, so the pill silently became editable again
+  mid-chat and a pick made in that window really did apply at the next
+  `session/new` — splicing a different system prompt into one transcript. The
+  chat-scoped latch (`_SYSTEM_PROMPT_MODE_LATCH_SESSION_KEY`, stamped by
+  `apply_session_acp_modes`) ORs over it in `_acp_system_prompt_mode_info`, and
+  `handle_acp_config_set` checks it **before** the client so a rebuilt child
+  cannot reopen the write.
 - The editable window is therefore the **draft**, before the first turn. The
   desktop keeps that pick in `$draftAcpSystemPromptMode` (sticky localStorage,
   same contract as model/effort/fast) and `createBackendSessionForSend` replays
@@ -169,7 +180,7 @@ of the app are allowed to call:
 |---|---|---|
 | `bind_agent(agent)` | 1263 | Weakref to the owning `AIAgent`. The client is built inside `AIAgent.__init__`, so markers the fork stamps *after* construction are read off the bound agent, not a constructor arg |
 | `set_permission_mode(mode)` | 1311 | Sets the session override and returns the effective mode. Idempotent — a no-op when unchanged, so it is safe to call every turn |
-| `permission_mode_state()` | 1329 | `{value, source, options, locked}` for a UI to render |
+| `permission_mode_state()` | 1329 | `{value, source, advertised, options, locked}` for a UI to render. `value` is reconciled against `options` once a session is live — see below |
 | `close()` | 1354 | Shut the subprocess down |
 
 Resolution ladder, `_effective_acp_mode()` (`:1301`) then `_requested_acp_mode()`
@@ -209,6 +220,32 @@ Published on every `session.info`. Built by `_acp_permission_mode_info()`
 When the session is not Claude-over-ACP every field is falsy and `available` is
 `false`. That is the whole gating contract — see invariant 1 in the
 [README](README.md).
+
+#### `value` is always one of `options`, or empty
+
+The composer paints this as a radio group keyed on **exact** mode ids, so the
+two fields have to agree or the menu renders with nothing selected and a label
+the user cannot pick back to — which reads as "my mode is missing" rather than
+"my mode was rejected".
+
+Once a session is live, `permission_mode_state()` resolves the configured value
+against the ids the agent advertised, using the same exact-then-case-insensitive
+ladder `_select_acp_mode()` uses on the wire, so the two can never disagree:
+
+| Configured | Published `value` | `source` | Why |
+|---|---|---|---|
+| `plan` | `plan` | `config` | advertised, applied |
+| `AcceptEdits` | `acceptEdits` | `config` | case-folded on the wire too; publishing the user's spelling would paint nothing selected |
+| `auto` | agent's `currentModeId` | `agent` | unadvertised — `_select_acp_mode` logged it and left the agent alone, so report what the agent is actually on |
+
+Before a session exists there is nothing to reconcile against and nothing to
+lie about, so the configured string is echoed verbatim with `advertised: false`.
+That block is the draft pill, which is read-only anyway.
+
+Note this is a *display* contract only. An unadvertised id in `config.yaml`
+still degrades silently into passthrough on the wire — YAML is not validated on
+load, only RPC-driven `config.set` is. See [`todo.md`](todo.md) → "Permission
+dropdown has no 'leave the agent alone' option".
 
 ### `config.get` / `config.set`, key `permission_mode`
 

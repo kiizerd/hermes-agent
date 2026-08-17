@@ -96,12 +96,15 @@ python -m pytest tests/acp/ \
   tests/agent/test_copilot_acp_client.py \
   tests/agent/test_copilot_acp_approval_routing.py \
   tests/agent/test_copilot_acp_usage.py \
+  tests/agent/test_copilot_acp_permission_mode_state.py \
   tests/agent/test_acp_claude_alias_context.py \
   tests/agent/transports/test_hermes_tools_mcp_server.py \
   tests/scripts/test_fork_signature_drift.py \
   tests/tools/test_memory_disk_sync.py \
   tests/tools/test_approval_tool_allowlist.py \
   tests/agent/test_empty_tool_name_loop_dampening.py \
+  tests/tui_gateway/test_acp_session_provider.py \
+  tests/tui_gateway/test_acp_system_prompt_mode_latch.py \
   tests/hermes_cli/test_api_key_providers.py \
   tests/hermes_cli/test_model_validation.py \
   tests/hermes_cli/test_setup_model_provider.py -q

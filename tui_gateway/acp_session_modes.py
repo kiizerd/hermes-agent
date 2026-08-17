@@ -38,6 +38,10 @@ The DURABLE store is the session dict, not the client. A model switch rebuilds
 drop an override held only on the client; re-pushing from the session at turn
 start makes the pick survive that, and covers a draft that picked a mode before
 its agent existed.
+
+The bridge/native LOCK follows that same split, and for the same reason: a
+client can only speak for the lifetime of its own ACP subprocess, and the chat
+outlives it. See ``_SYSTEM_PROMPT_MODE_LATCH_SESSION_KEY``.
 """
 
 import logging
@@ -50,6 +54,22 @@ _PERMISSION_MODE_SESSION_KEY = "permission_mode_override"
 
 _SYSTEM_PROMPT_MODE_SESSION_KEY = "acp_system_prompt_mode_override"
 _SYSTEM_PROMPT_MODE_OPTIONS: tuple[str, ...] = ("bridge", "native")
+
+# Stamped once a chat has actually started a turn.
+#
+# The client's own ``locked`` is scoped to the ACP SUBPROCESS -- it is
+# ``bool(self._session_id)``, and ``_shutdown_process`` clears that id on a model
+# switch, a transcript divergence, and a failed resync. So the composer pill
+# silently became editable again mid-chat every time the child was rebuilt, and
+# a pick made in that window really did take effect on the next ``session/new``.
+# systemPrompt is sent once per ACP session with no RPC to re-send it, so that
+# spliced a DIFFERENT system prompt into the middle of one transcript.
+#
+# This latch is scoped to the CHAT instead, and it is a hard one: once a chat has
+# taken a turn its bridge/native pick is frozen for the life of that chat, model
+# switches included. Starting a new chat is the escape hatch -- a fresh session
+# dict carries no latch, which is also why nothing has to clear it.
+_SYSTEM_PROMPT_MODE_LATCH_SESSION_KEY = "acp_system_prompt_mode_latched"
 
 _EMPTY_MODE_INFO = {"available": False, "value": "", "source": "", "locked": False, "options": []}
 
@@ -204,6 +224,49 @@ def _apply_session_system_prompt_mode(session: dict | None) -> str:
         return ""
 
 
+def _system_prompt_mode_latched(session: dict | None) -> bool:
+    """True once this CHAT has committed to a bridge/native pick.
+
+    Three independent tells, because no single one covers every way a chat
+    arrives at "already started":
+
+    * the explicit latch, stamped at turn start -- the live path, and the only
+      one that holds during turn 1, while ``history`` is still the empty
+      pre-turn snapshot;
+    * a resume handle: the desktop resumes with ``defer_history=True``, so
+      ``session["history"]`` is ``[]`` for the first moment of a chat that
+      already has fifty turns behind it, and the pill would flash editable;
+    * a non-empty history -- the durable fallback covering every other resume
+      path, and what keeps this honest across a gateway restart, which drops
+      the in-memory flag but not the transcript.
+
+    Read without ``history_lock``: this only asks whether the list is empty, and
+    a list being appended to is never momentarily empty.
+    """
+    if not session:
+        return False
+    if session.get(_SYSTEM_PROMPT_MODE_LATCH_SESSION_KEY):
+        return True
+    if "resume_history_ready" in session:
+        return True
+    return bool(session.get("history"))
+
+
+def _latch_system_prompt_mode(session: dict | None) -> None:
+    """Freeze this chat's bridge/native pick. Called once per turn, at turn start.
+
+    Gated on the ACP client rather than on ``_acp_provider_is_claude``: a session
+    whose agent has no ``set_system_prompt_mode`` is not an ACP session at all,
+    so this leaves no dead key on the OpenAI/Gemini chats sharing the process --
+    and it costs no config read on the turn-start path.
+    """
+    if session is None:
+        return
+    if _acp_system_prompt_mode_client(session) is None:
+        return
+    session[_SYSTEM_PROMPT_MODE_LATCH_SESSION_KEY] = True
+
+
 def _acp_system_prompt_mode_info(session: dict | None, provider: str) -> dict:
     """The ``acp_system_prompt_mode`` block published on session.info.
 
@@ -227,12 +290,21 @@ def _acp_system_prompt_mode_info(session: dict | None, provider: str) -> dict:
             "available": True,
             "value": pinned if pinned in _SYSTEM_PROMPT_MODE_OPTIONS else default_mode,
             "source": "session" if pinned else "config",
-            "locked": False,
+            # A resumed chat reaches here whenever its agent has not been rebuilt
+            # yet, so this branch has to honour the latch too -- reporting False
+            # would hand the user an editable pill on a fifty-turn transcript.
+            "locked": _system_prompt_mode_latched(session),
             "options": list(_SYSTEM_PROMPT_MODE_OPTIONS),
         }
     try:
         state = dict(client.system_prompt_mode_state())
         state["available"] = True
+        # OR, never AND. The client's own lock is the ACP subprocess's lifetime
+        # and drops on every rebuild; the chat's latch outlives it. Deliberately
+        # additive: the client stays free to lock a chat this latch has not
+        # reached yet (the gap between session/new and the first turn end).
+        if _system_prompt_mode_latched(session):
+            state["locked"] = True
         return state
     except Exception:
         logger.debug("system-prompt-mode state failed", exc_info=True)
@@ -260,9 +332,14 @@ def apply_session_acp_modes(session: dict | None) -> None:
     pinned on the old one. Also covers a draft that picked a mode before its
     agent existed. A no-op for every non-ACP provider and every unpinned
     session, so it is safe to call unconditionally.
+
+    The bridge/native latch is stamped LAST, after the pick has been pushed: a
+    turn is about to run, so whatever mode this session is on is the mode its
+    transcript will be written under, and it must not change again.
     """
     _apply_session_permission_mode(session)
     _apply_session_system_prompt_mode(session)
+    _latch_system_prompt_mode(session)
 
 
 def _session_provider(session: dict) -> str:
@@ -273,9 +350,14 @@ def _session_provider(session: dict) -> str:
     from.
     """
     override = session.get("model_override")
-    provider = str(
-        (override or {}).get("provider") if isinstance(override, dict) else ""
-    ).strip()
+    provider = ""
+    if isinstance(override, dict):
+        # ``.get("provider")`` can be an explicit ``None`` (a model_override
+        # with no provider key -- see session.create's `provider` being
+        # omitted whenever the desktop's provider selection is empty), and
+        # bare `str(None)` would stringify to the literal "None", which is
+        # truthy and skips the agent fallback below. `or ""` catches that.
+        provider = str(override.get("provider") or "").strip()
     if not provider:
         provider = str(getattr(session.get("agent"), "provider", "") or "").strip()
     return provider
@@ -387,6 +469,18 @@ def handle_acp_config_set(
 
         raw = str(value or "").strip().lower()
         client = _acp_system_prompt_mode_client(session)
+
+        # The chat-scoped latch is checked FIRST and independently of the client:
+        # after a subprocess rebuild the client's own lock reads False, and this
+        # is the whole point of the latch -- a chat that has taken a turn cannot
+        # change the system prompt its transcript was written under, no matter
+        # what tore the child down in between.
+        if _system_prompt_mode_latched(session):
+            return err(
+                rid,
+                4002,
+                "acp_system_prompt_mode is locked for this chat; start a new chat to change it",
+            )
 
         # Unlike permission_mode there is no live re-negotiation possible --
         # systemPrompt is sent once, at session/new, and there is no RPC to

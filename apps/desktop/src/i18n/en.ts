@@ -2289,7 +2289,7 @@ export const en: Translations = {
         ? 'Native — running on Hermes’ own system prompt instead of Claude Code’s'
         : 'Bridge — Hermes instructions appended onto Claude Code’s own system prompt',
     bridgeModeDraft: mode => `${mode} — click to switch. Sending a message locks it in for this chat`,
-    bridgeModeLocked: mode => `${mode} — locked while this chat’s session is running`,
+    bridgeModeLocked: mode => `${mode} — locked for this chat. Start a new chat to switch`,
     bridgeModeFailed: 'Could not change the system prompt mode',
     lookupLoading: 'Looking up…',
     lookupNoMatches: 'No matches.',

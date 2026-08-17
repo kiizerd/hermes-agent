@@ -25,7 +25,7 @@ and Hermes' own tool surface handed back to the agent over MCP.
 | [`changes.md`](changes.md) | What we changed, commit by commit and file by file |
 | [`surfaces.md`](surfaces.md) | Config keys, env vars, gateway RPC, desktop UI — the contracts a user or another surface touches |
 | [`wire-contracts.md`](wire-contracts.md) | Exact ACP/SDK wire shapes, read off `acp-agent.js` or proven on the wire. Do not guess these |
-| [`verification.md`](verification.md) | The probe harnesses and the test set that gate the fork |
+| [`verification.md`](verification.md) | The probe harnesses, the signature-drift check, and the test set that gate the fork |
 | [`upstreaming.md`](upstreaming.md) | What should go to Nous, what stays local, and why |
 | [`todo.md`](todo.md) | Confirmed gaps not yet patched |
 

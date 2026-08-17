@@ -7214,6 +7214,20 @@ def _make_agent(
         provider_data_collection=_pr.get("data_collection"),
         platform=_resolve_agent_platform(platform_override),
         session_id=session_id or key,
+        # `_register_session_cwd()` records the desktop-selected project's cwd
+        # under `session["session_key"]`. CopilotACPClient's `_resolve_acp_cwd()`
+        # reads it back via `agent._gateway_session_key` -- without this the
+        # Claude ACP child always fell back to the backend's own launch
+        # directory, ignoring the chosen project entirely.
+        #
+        # `key`, NOT `session_id or key` like the line above. They are the same
+        # value today only by coincidence: the lazy-build path passes
+        # `session_id=current["resume_session_id"]`, which is a frozen snapshot
+        # of `session["session_key"]` taken at resume, while `_register_session_cwd`
+        # re-reads that key live on every call -- and the resume frame handler
+        # can reassign it. `key` IS `session["session_key"]` at both call sites,
+        # so it is the only value that cannot drift away from the cwd registry.
+        gateway_session_key=key,
         session_db=session_db if session_db is not None else _get_db(),
         ephemeral_system_prompt=system_prompt or None,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),

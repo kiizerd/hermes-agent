@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **71 files, +8,610 / −283**.
+against the merge base: **73 files, +10,286 / −283**.
 
 Last verified against `upstream/main` at `00c12dac613` (2026-08-16). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -18,6 +18,25 @@ for c in $(git rev-list --reverse "$MB"..main); do
   git show --pretty="" --numstat "$c"
 done
 ```
+
+Computing the header total is self-referential — this file postdates the merge
+base, so every line already here counts, and editing it moves the number you are
+trying to report. Do all structural edits first, then compute, then write the
+total by replacing text *within* an existing line so the line count cannot shift,
+then recompute to confirm.
+
+Compute it **from the index**, not the working tree:
+
+```bash
+git add docs/fork/changes.md
+git diff --cached --numstat "$MB" | awk '{a+=$1;d+=$2;n++} END {print n,a,d}'
+```
+
+`git diff "$MB"` (no `--cached`) reads the working tree, which is only correct
+when nothing else is in flight. On 2026-08-16 a second session was editing the
+ACP files during this very update; the working-tree form read **+10,345** and
+the index form **+10,200**, and the 145-line difference belonged to someone
+else's uncommitted work.
 
 ## Ledger
 
@@ -396,6 +415,71 @@ outlives the TypeScript detail: **55 of the 72 lines are values, not types**
 (`types.ts` is +17; the rest is string literals), and declaration merging is a
 type-level tool with no mechanism for injecting runtime values.
 
+### `5391e207772` — add a post-rebase signature-drift check
+
+4 files, +1,591 / −1. Two new fork-only files
+(`scripts/fork/signature_drift.py` +882, `tests/scripts/test_fork_signature_drift.py`
++622) plus the `verification.md` section that documents them.
+
+Closes the gap the `single_query_deny_message` break exposed on 2026-08-16
+(see the entry above it in this ledger, and `verification.md`). Upstream changed
+a helper's signature in `tools/approval.py`; our caller lives in
+`agent/copilot_acp_client.py`. Different file, so the rebase was clean, the
+overlap scout saw nothing, the `merge-tree` rehearsal was clean, the CRLF pass
+was clean, and the branch shipped raising `TypeError`. **No textual check can
+see that class of break** — it is a property of the call, not of the text.
+
+The tool walks the fork's own files, resolves every call into a first-party
+helper, rebuilds that helper's signature from source at a chosen revision, and
+asks CPython's own `Signature.bind` whether the call still fits. Validate mode
+(`python scripts/fork/signature_drift.py`) answers "is the fork broken now";
+`--against upstream/main` answers "will pulling break it", which is the form to
+run **before** a pull.
+
+Three decisions carry it:
+
+- **It walks the whole AST, not `tree.body`.** The real call site imports
+  `_run_approval_gate` inside a function. A module-level-only import index finds
+  zero calls in that file and reports it clean — the tool would have missed the
+  very break it was written for.
+- **It applies git's three-way merge rule, not a two-way diff.** "Does this
+  exist upstream" is the wrong question; "will this bind after I rebase onto
+  upstream" is the right one, and a rebase carries our hunks across. Presence at
+  the **merge base** is what separates *upstream deleted this* from *we added
+  this*. Without that arm the first real run against `upstream/main` produced 10
+  BREAKs, every one a fork-only symbol. The same rule at signature level
+  silences `CopilotACPClient(advisory=…)`, absent upstream only because we added
+  it. When both sides changed one signature, it says so rather than picking.
+- **It reconstructs a real `inspect.Signature` and calls `.bind()`.**
+  Positional-only `/`, keyword-only `*`, defaults and varargs then behave
+  exactly as the interpreter does, instead of as a hand-rolled approximation
+  that drifts from CPython.
+
+It also catches a reorder of parameters passed positionally — which binds
+cleanly and quietly means something else, the one drift `bind()` alone is blind
+to.
+
+Evidence is a reproduction, not a green run: "no breaks" is also what a tool
+that checks nothing prints. The pre-fix caller
+(`git show <fix>^:agent/copilot_acp_client.py`) bound against today's
+`tools/approval.py` yields exactly one finding, `missing a required argument:
+'single_query_deny_message'`. Test fixtures are synthetic on purpose — a rebase
+rewrites every fork SHA, so a test pinned to the real commits rots the way this
+ledger's own SHAs did.
+
+Two bugs the tests caught, both worth recording because both were invisible in
+the mode being exercised. `subprocess.run(text=True)` decodes with the **locale**
+codec (cp1252 here); `tools/approval.py` has `→` in a docstring, so `git show`
+raised `UnicodeDecodeError` in the reader thread and the resolver reported the
+file as *nonexistent at that revision* — only on the git path, while validate
+mode read the working tree with an explicit encoding and looked healthy. And
+signatures were cached under `SourceTree.label` (`rev or "working tree"`), so
+two trees differing only by root collided and every diff came back empty; a
+display string is not a cache identity.
+
+Current state: `--against upstream/main` is clean across 1,511 first-party call
+sites in 22 fork files, so the 12 unpulled upstream commits break no call site.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -451,6 +535,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 
 | File | Δ |
 |---|---|
+| `tests/scripts/test_fork_signature_drift.py` | +622 (fork-only; synthetic fixtures, plus a live guard over the real fork) |
 | `tests/agent/test_copilot_acp_approval_routing.py` | +530 |
 | `tests/agent/test_copilot_acp_client.py` | +353 / −1 |
 | `tests/agent/test_copilot_acp_system_prompt_mode.py` | +303 (bridge/native wire shape, exclusions, lock) |
@@ -471,6 +556,7 @@ Upstream has no file at these paths, so they can never conflict.
 
 | File | Δ | Role |
 |---|---|---|
+| `scripts/fork/signature_drift.py` | +882 | Post-rebase signature-drift check: AST call-site index, three-way signature resolution, `Signature.bind` verdict |
 | `tui_gateway/acp_session_modes.py` | +434 | Permission-mode and bridge/native session modes: 7 helpers, 2 `config.set` arms, injected server helpers |
 | `agent/acp_alias_context.py` | +73 | Context windows for bare Claude Code aliases: table, ACP provider set, exact-match resolver |
 | `claude-acp/claude-acp-run.js` | +126 | Windows launcher. Scrubbed-env allowlist; `ENABLE_TOOL_SEARCH=false`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |

@@ -172,7 +172,7 @@ class TestAgentLoopDispatch:
                 self.handlers[name] = fn
 
         monkeypatch.setattr(
-            "mcp.server.fastmcp.FastMCP", FakeMCP, raising=False
+            "mcp.server.MCPServer", FakeMCP, raising=False
         )
         monkeypatch.setattr(
             "model_tools.get_tool_definitions", lambda **kw: fake_defs
@@ -389,7 +389,7 @@ class TestSkillManageExposure:
                 self.handlers[name] = fn
 
         monkeypatch.setattr(
-            "mcp.server.fastmcp.FastMCP", FakeMCP, raising=False
+            "mcp.server.MCPServer", FakeMCP, raising=False
         )
         monkeypatch.setattr(
             "model_tools.get_tool_definitions", lambda **kw: fake_defs

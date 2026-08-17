@@ -40,6 +40,16 @@ Two families:
 | `probe_review_restriction.py` | module | Restricted / advisory / normal / unbound-client arms — 14 checks, normal arm as the negative control |
 | `probe_session_mode_override.py` | module | The session-scoped mode ladder and the params `_ensure_session` builds from it |
 | `probe_mode_rpc.py` | module | The real registered `config.get` / `config.set permission_mode` handlers out of `tui_gateway.server._methods` — the exact calls the pill makes |
+
+Both mode probes address the helpers as `acpmodes.*` since those moved to
+`tui_gateway/acp_session_modes.py`, but deliberately keep reading
+`_acp_permission_mode_info` / `_acp_system_prompt_mode_info` off
+`tui_gateway.server`. That is not an oversight: `methods_config.py` resolves
+those two names from `server.py`'s globals at call time, so a probe that reads
+them there doubles as a regression test for the re-export. If the import is ever
+dropped from `server.py`, these probes fail instead of `config.get` failing in
+production.
+
 | `probe_approval_routing.py` | module | Replays the `session/request_permission` branch through the real `tools.approval` gates; verifies per-target keying |
 | `probe_toolname_enrichment.py` | module | Replays frames captured from the live wire; does the toolName cache produce a narrow per-tool key? |
 | `probe_system_prompt_append.py` | module | The memory/skill standing-instructions block: normal, operator-override, opted-out and advisory arms |

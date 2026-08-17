@@ -3,43 +3,6 @@
 Confirmed gaps, not yet patched. Each entry: what's broken, the evidence, the
 fix. Move a row to [`changes.md`](changes.md) once it lands.
 
-## ACP session cwd never reaches the subprocess
-
-**Found:** 2026-08-15
-
-`agent/runtime_cwd.py::resolve_agent_cwd()` is Hermes' single source of truth
-for the configured working directory (`_SESSION_CWD` contextvar →
-`TERMINAL_CWD` → launch-dir fallback). The Codex provider wires it in:
-
-```
-agent/codex_runtime.py:704
-cwd = getattr(agent, "session_cwd", None) or str(resolve_agent_cwd())
-```
-
-`CopilotACPClient.__init__` never does:
-
-```
-agent/copilot_acp_client.py:1247
-self._acp_cwd = str(Path(acp_cwd or os.getcwd()).resolve())
-```
-
-`acp_cwd` is a real constructor kwarg, but nothing in production ever passes
-it — grepped every `CopilotACPClient(...)` / `client_kwargs` build site
-(`agent/agent_runtime_helpers.py:2365`, `agent/auxiliary_client.py:6766`,
-`agent/agent_init.py`); only `tests/agent/test_copilot_acp_client.py` sets it.
-So the Claude-via-ACP subprocess always launches with `os.getcwd()` of the
-Hermes backend process — never the session/profile cwd a desktop chat is
-configured for. A new session pinned at a project directory still lands the
-agent (and its shell tools) at the backend's own launch dir.
-
-**Fix:** wherever `client_kwargs` is assembled for `provider == "copilot-acp"`
-(`agent/agent_init.py`, mirrors the `agent_runtime_helpers.py:2365` construction
-site), add `client_kwargs["acp_cwd"] = str(resolve_agent_cwd())` — same pattern
-as `codex_runtime.py:704`. Verify out-of-process per invariant 5: drive a real
-session pinned at a directory other than the backend's launch dir and confirm
-the spawned `claude-agent-acp` subprocess's actual cwd (not just the value
-passed) matches.
-
 ## Desktop UI tools (open_preview, read_terminal, focus_pane…) never reach the ACP subprocess
 
 **Found:** 2026-08-15
@@ -87,3 +50,115 @@ back into the gateway process for that session id.
 Verify out-of-process per invariant 5: from a live Claude Sub ACP session,
 call the exposed tool and confirm the preview pane actually opens in the
 desktop app — not just that the MCP call returns without error.
+
+## AskUserQuestion tool disabled for every Claude-via-ACP session
+
+**Found:** 2026-08-17
+
+`claude-agent-acp`'s `dist/acp-agent.js` (~line 4186-4193) gates the
+`AskUserQuestion` tool on a client-declared capability:
+
+```js
+const elicitationSupport = { form: !!this.clientCapabilities?.elicitation?.form, ... };
+const disallowedTools = elicitationSupport.form ? [] : ["AskUserQuestion"];
+```
+
+Hermes' handshake in `agent/copilot_acp_client.py:2229-2234` never sends an
+`elicitation` key:
+
+```python
+"clientCapabilities": {
+    "fs": {"readTextFile": True, "writeTextFile": True}
+},
+```
+
+so `elicitationSupport.form` is always false and `AskUserQuestion` is
+unconditionally in `disallowedTools`. This is **not** mode-gated — the
+Bridge/Native `system_prompt_mode` switch (`_effective_system_prompt_mode()`,
+`copilot_acp_client.py:1579`) only touches the `systemPrompt` payload sent at
+`session/new`, never `clientCapabilities`, which is negotiated once at
+`initialize` before any session opens (same "no resend RPC" constraint that
+makes the Bridge pill pre-session-only). Confirmed via grep — no
+`elicitation` string anywhere in `copilot_acp_client.py`.
+
+**Fix:** two parts, not a flag flip.
+1. Add `"elicitation": {"form": True}` (and maybe `"url"`) to the
+   `clientCapabilities` dict at `copilot_acp_client.py:2229`.
+2. Implement the matching render/response leg on the Hermes side: once the
+   capability is declared, `claude-agent-acp` will start sending elicitation
+   requests over the ACP connection when `AskUserQuestion` is called. Nothing
+   in `copilot_acp_client.py` currently handles that RPC — declaring the
+   capability without a handler means the request gets dropped on the floor
+   and the tool call hangs or errors. Needs: (a) the ACP method name/shape
+   claude-agent-acp uses for the elicitation request (check
+   `acp-agent.js` for what it sends when `elicitationSupport.form` is true —
+   likely a `session/request_permission`-style extension, not a stock ACP
+   method), (b) a UI surface to render the form (desktop composer prompt,
+   similar to the existing permission-gate dialog), (c) wiring the reply back
+   through whatever RPC id/session key the request carried.
+
+Verify out-of-process per invariant 5: drive a live Claude Sub ACP session,
+trigger a real `AskUserQuestion` call, and confirm a form actually renders
+in the desktop app and the answer round-trips back to the agent — not just
+that the tool stops appearing in `disallowedTools`.
+
+## Permission dropdown has no "leave the agent alone" option
+
+**Found:** 2026-08-17
+
+The desktop permission-mode dropdown offers only ids the ACP agent
+advertises — `default`, `plan`, `acceptEdits`, `bypassPermissions` for
+`claude-agent-acp@0.64.2`. There is no entry for the *unset* state, even
+though unset is a real, documented, and behaviourally distinct mode.
+
+`_requested_acp_mode()` (`agent/copilot_acp_client.py:820-845`) returns the
+raw configured string. `_select_acp_mode()` (`:848-881`) matches it against
+`_acp_mode_ids(session)` exactly (`:862`) then case-insensitively (`:864`);
+on no match it logs and **returns without sending `session/set_mode` at all**
+(`:865-872`), leaving the child on whatever mode it started in. An empty
+string takes the same no-RPC path. The docstring at `:823-825` states this is
+deliberate — "an unset value leaves the agent on whatever mode it chose for
+itself" — so *passthrough is a supported mode*; it simply has no id, so
+nothing can offer it in a list built from advertised ids.
+
+**The user reached it by accident.** `copilot_acp.permission_mode: auto` was
+set in `~/.hermes/config.yaml`. `auto` is not an advertised id, so it fell
+down the same `:865-872` no-match path as empty, no `session/set_mode` was
+ever sent, and the child ran on its own start mode — which asked for zero
+permissions, so Hermes' `session/request_permission` handler (`:2835-2977`)
+never fired and no approval cards appeared. Changing the value to `default`
+made the RPC land for the first time and the cards returned. Note the config
+file is **not** validated on load: `tui_gateway/acp_session_modes.py:385-425`
+rejects an unknown id with error 4002, but only for RPC-driven `config.set`,
+so a junk value in YAML degrades silently into passthrough.
+
+Two things are unresolved and must be settled before implementing:
+
+1. **Why the child's own start mode asks for nothing.** Not established.
+   `_select_acp_mode`'s docstring (`:851-854`) notes a `settings.json`
+   `defaultMode` is only read on paths that see the real `HOME`, which the
+   `claude-acp-run.js` launcher wrapper hides — so the child is falling back
+   to some built-in default. Whether that default is genuinely permissive, or
+   whether the launcher's env allowlist is what suppresses the prompts, needs
+   to be read out of `claude-agent-acp`'s `dist/acp-agent.js` and the
+   launcher. Shipping an "Auto" that silently means bypass-everything is the
+   thing to avoid.
+2. **What "Auto" should map to**, once (1) is known: an explicit
+   passthrough sentinel (honest — "don't manage the mode", the current
+   behaviour given a name), an alias for an advertised permissive id
+   (predictable, but `acceptEdits`/`bypassPermissions` already exist and say
+   what they do), or a Hermes-side auto-approve allowlist that answers
+   `session/request_permission` without a card (keeps Hermes in the loop, but
+   duplicates `approvals.tool_allowlist`).
+
+**Fix sketch (option 1, passthrough sentinel):** reserve an id the agent can
+never advertise (e.g. `""` rendered as `Auto`), inject it as the first choice
+in the list the dropdown is built from, exempt it from the 4002 validation in
+`acp_session_modes.py:416-424`, and let it flow to the existing no-match path
+unchanged. Label it for what it does — "Agent's own default (no override)" —
+not "Auto", which reads like a Hermes feature rather than an abdication.
+
+Verify out-of-process per invariant 5: pick the option in a live Claude Sub
+ACP session and confirm from the log that no `session/set_mode` is sent
+(`:878` stays silent) and that the pill still reads back the chosen value
+after a reconnect.

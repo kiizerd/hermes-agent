@@ -23,6 +23,7 @@ import threading
 import time
 import weakref
 from collections import deque
+from difflib import unified_diff
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -345,6 +346,79 @@ _TERMINAL_TOOL_STATUSES = frozenset(
 _TOOL_NAME_CACHE_MAX = 256
 
 
+#: ACP edit tools, mapped to the Hermes tool names the inline-diff and
+#: file-edit-card pipelines key off. Safe only because the same tool call
+#: carries the agent's own diff in its ``type: "diff"`` content blocks -- see
+#: ``_acp_tool_display``.
+_ACP_EDIT_TOOL_NAMES = {"Write": "write_file", "Edit": "patch"}
+
+
+def _acp_diff_blocks(fields: dict[str, Any]) -> list[tuple[str, str | None, str]]:
+    """Pull ``(path, old_text, new_text)`` out of ACP ``type: "diff"`` blocks.
+
+    ``claude-agent-acp`` emits one whole-file block from the tool input when
+    the call starts, then replaces it with one block per ``structuredPatch``
+    hunk once the edit lands. Both shapes read the same way here.
+    """
+    content = fields.get("content")
+    if not isinstance(content, list):
+        return []
+    blocks: list[tuple[str, str | None, str]] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "diff":
+            continue
+        path = block.get("path")
+        new_text = block.get("newText")
+        if not isinstance(path, str) or not path:
+            continue
+        if not isinstance(new_text, str):
+            continue
+        old_text = block.get("oldText")
+        blocks.append((path, old_text if isinstance(old_text, str) else None, new_text))
+    return blocks
+
+
+def _acp_unified_diff(fields: dict[str, Any]) -> str | None:
+    """Render ACP diff content blocks as unified diff text.
+
+    Blocks are grouped by path so a multi-hunk edit reads as one file section
+    rather than repeating the ``---``/``+++`` header per hunk. Returns None
+    when the call carries no diff blocks or nothing actually changed -- an
+    empty diff must not become an empty preview card.
+    """
+    blocks = _acp_diff_blocks(fields)
+    if not blocks:
+        return None
+
+    from agent.display import _display_diff_path
+
+    sections: list[str] = []
+    for path in dict.fromkeys(path for path, _old, _new in blocks):
+        hunks: list[str] = []
+        for block_path, old_text, new_text in blocks:
+            if block_path != path:
+                continue
+            before = old_text.splitlines(keepends=True) if old_text else []
+            after = new_text.splitlines(keepends=True)
+            body = list(unified_diff(before, after, n=3))[2:]  # drop per-hunk headers
+            if body:
+                hunks.append("".join(body))
+        if not hunks:
+            continue
+        try:
+            display_path = _display_diff_path(Path(path))
+        except Exception:
+            display_path = path
+        header = f"--- a/{display_path}\n+++ b/{display_path}\n"
+        sections.append(header + "".join(hunks))
+
+    if not sections:
+        return None
+    return "".join(
+        section if section.endswith("\n") else section + "\n" for section in sections
+    )
+
+
 def _acp_tool_display(fields: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Map a merged ACP tool call to the ``(name, args)`` Hermes' UI expects.
 
@@ -354,11 +428,14 @@ def _acp_tool_display(fields: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     coarse ACP enum, so neither substitutes for it. Other ACP agents omit the
     ``claudeCode`` sidecar entirely, hence the ``kind`` fallback.
 
-    The name is deliberately *not* translated to a Hermes tool name: the
-    gateway's edit-snapshot and inline-diff paths key off names like ``patch``
-    and ``write_file`` with Hermes' own argument and result shapes, and feeding
-    them ACP shapes would render a diff from data that never described one.
-    Unknown names fall through to the generic tool card instead.
+    Edit tools ARE translated to the Hermes names the diff and card pipelines
+    key off (``agent/display.py``'s name sets, the desktop's
+    ``FILE_EDIT_TOOL_NAMES``), and their ``file_path`` argument is renamed to
+    ``path`` to match. This is only safe because the ACP call also carries the
+    real diff in its ``type: "diff"`` content blocks, which
+    ``_acp_tool_result_text`` forwards: the preview renders the agent's own
+    diff, never one inferred from a filesystem snapshot Hermes guessed at.
+    Every other name falls through to the generic tool card unchanged.
     """
     meta = fields.get("_meta")
     claude_meta = meta.get("claudeCode") if isinstance(meta, dict) else None
@@ -369,16 +446,50 @@ def _acp_tool_display(fields: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         name = str(fields.get("kind") or "").strip() or "tool"
     raw_input = fields.get("rawInput")
     args = dict(raw_input) if isinstance(raw_input, dict) else {}
-    return name, args
+
+    canonical_name = _ACP_EDIT_TOOL_NAMES.get(name)
+    if canonical_name is None:
+        return name, args
+    if "file_path" in args:
+        args["path"] = args.pop("file_path")
+    return canonical_name, args
 
 
 def _acp_tool_result_text(fields: dict[str, Any]) -> str:
     """Best-effort result string for a finished ACP tool call.
 
+    For an edit tool whose call carries ``type: "diff"`` content blocks, the
+    rendered diff rides along under ``diff`` in a JSON envelope. That is the
+    key ``agent/display.py::extract_edit_diff`` reads to emit ``inline_diff``,
+    which is what draws the desktop's file-edit card -- without it an ACP edit
+    renders as a bare tool row. ``success`` mirrors the call's own status so a
+    failed edit never presents a diff as though it landed.
+
     Never returns empty: the gateway treats a falsy result as "no output to
     show" and the card would render as though the tool did nothing.
     """
     raw_output = fields.get("rawOutput")
+
+    meta = fields.get("_meta")
+    claude_meta = meta.get("claudeCode") if isinstance(meta, dict) else None
+    tool_name = ""
+    if isinstance(claude_meta, dict):
+        tool_name = str(claude_meta.get("toolName") or "").strip()
+    if tool_name in _ACP_EDIT_TOOL_NAMES:
+        diff_text = _acp_unified_diff(fields)
+        if diff_text:
+            envelope: dict[str, Any] = dict(raw_output) if isinstance(raw_output, dict) else {}
+            blocks = _acp_diff_blocks(fields)
+            envelope["success"] = str(fields.get("status") or "").strip().lower() not in {
+                "failed", "error", "cancelled", "canceled",
+            }
+            envelope["path"] = blocks[0][0]
+            envelope["diff"] = diff_text
+            try:
+                return json.dumps(envelope, ensure_ascii=False)[:_TOOL_RESULT_MAX_CHARS]
+            except Exception:
+                pass
+
     if raw_output:
         try:
             return json.dumps(raw_output, ensure_ascii=False)[:_TOOL_RESULT_MAX_CHARS]

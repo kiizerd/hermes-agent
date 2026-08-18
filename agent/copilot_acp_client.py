@@ -2994,6 +2994,7 @@ class CopilotACPClient:
                 # pattern key hashed the full command string so answering
                 # [a]lways never matched the next, slightly different call.
                 from tools.approval import (
+                    check_command_floors,
                     check_dangerous_command,
                     is_tool_allowlisted,
                     _run_approval_gate,
@@ -3016,15 +3017,54 @@ class CopilotACPClient:
                 kind = str(tool_call.get("kind") or "").strip()
                 shell_command = _acp_shell_command(tool_call)
 
+                # The negotiated permission mode (session/set_mode, recorded on
+                # _ensure_session / _sync_acp_mode) is an OPERATOR opt-in: it
+                # comes from HERMES_ACP_PERMISSION_MODE, the desktop composer
+                # pill, or copilot_acp.permission_mode in config.yaml, never
+                # from the sub-agent. Without this the mode only told the
+                # sub-agent to stop asking, while Hermes' own gate kept firing
+                # underneath -- so "bypass" still drew a card, and in a
+                # gateway/cron session fail_closed_when_no_human below turned
+                # that into a silent hard denial.
+                bypass_all = self._applied_mode == "bypassPermissions"
+                accept_edits = self._applied_mode == "acceptEdits" and kind == "edit"
+
                 if shell_command and (tool_name == "Bash" or kind == "execute"):
-                    # Real shell text: the dangerous-pattern matcher applies,
-                    # including the unconditional hardline floor for commands
-                    # with no recovery path. Safe reads auto-approve, so
-                    # routine calls stop prompting.
-                    result = check_dangerous_command(
-                        shell_command,
-                        env_type="local",
+                    if bypass_all:
+                        # Deliberately NOT a total skip. bypassPermissions is
+                        # the protocol-level --yolo, so it lands where --yolo
+                        # lands: the prompt goes away, the two floors --yolo
+                        # never skips do not. check_command_floors owns that
+                        # line for both callers.
+                        result = check_command_floors(shell_command) or {
+                            "approved": True, "message": None,
+                        }
+                        if result.get("approved"):
+                            logger.info(
+                                "Copilot ACP shell auto-approved "
+                                "(bypassPermissions): %.200s", shell_command,
+                            )
+                    else:
+                        # Real shell text: the dangerous-pattern matcher
+                        # applies, including the unconditional hardline floor
+                        # for commands with no recovery path. Safe reads
+                        # auto-approve, so routine calls stop prompting.
+                        result = check_dangerous_command(
+                            shell_command,
+                            env_type="local",
+                        )
+                elif bypass_all or accept_edits:
+                    # Non-shell under a widened mode. acceptEdits reaches only
+                    # kind="edit" -- the file writes the mode is named for --
+                    # so MCP calls, fetches and everything else keep the gate
+                    # below. Path-level protection for edits does not live
+                    # here anyway: fs/write_text_file still runs
+                    # get_write_denied_error / is_write_approval_required.
+                    logger.info(
+                        "Copilot ACP tool auto-approved by permission mode "
+                        "%s: %s", self._applied_mode, description,
                     )
+                    result = {"approved": True, "message": None}
                 else:
                     # Non-shell tools (Edit, Write, WebFetch, MCP calls) carry
                     # no command to pattern-match. Gate them per tool with a

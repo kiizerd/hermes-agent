@@ -432,6 +432,47 @@ def _acp_tool_name(tool_call: dict[str, Any]) -> str:
     return ""
 
 
+def _acp_air_failure(meta: Any) -> dict[str, Any] | None:
+    """Pull a typed session-failure record out of an ACP ``_meta`` blob.
+
+    claude-agent-acp 0.68+ places it at
+    ``_meta.jetbrains.air.sessionFailure`` once the client negotiates the
+    capability at ``initialize``. Returns the inner record (id, revision,
+    category, severity, title, ...) or ``None`` when absent. Defensive
+    throughout: older adapters or non-failure ``_meta`` must not crash the
+    reader.
+    """
+    if not isinstance(meta, dict):
+        return None
+    air = (
+        meta.get("jetbrains", {}) if isinstance(meta.get("jetbrains"), dict)
+        else {}
+    )
+    if not isinstance(air, dict):
+        return None
+    failure = air.get("air", {}).get("sessionFailure") if isinstance(
+        air.get("air"), dict
+    ) else None
+    if isinstance(failure, dict) and failure.get("title"):
+        return failure
+    return None
+
+
+def _acp_goal_snapshot(meta: Any) -> dict[str, Any] | None:
+    """Pull a goal snapshot out of an ACP ``_meta`` blob.
+
+    claude-agent-acp 0.66+ publishes it at ``_meta.goal`` on
+    ``session_info_update`` (and ``goal: null`` when cleared). Returns the
+    snapshot or ``None`` when absent or cleared.
+    """
+    if not isinstance(meta, dict):
+        return None
+    goal = meta.get("goal")
+    if isinstance(goal, dict):
+        return goal
+    return None
+
+
 def _acp_shell_command(tool_call: dict[str, Any]) -> str:
     """The literal shell string a Bash tool call will run.
 
@@ -2230,7 +2271,24 @@ class CopilotACPClient:
                     "fs": {
                         "readTextFile": True,
                         "writeTextFile": True,
-                    }
+                    },
+                    # Negotiate the opt-in ACP extensions claude-agent-acp 0.65+
+                    # advertises. Both are provider-neutral and gated server-side
+                    # on exactly this shape (_meta.jetbrains.air.version>=1 and a
+                    # matching capability), so omitting them here degrades cleanly
+                    # to legacy behaviour on older adapters.
+                    #
+                    #  - sessionFailure: structured error/warning transcript records
+                    #    (rate-limit, auth, context, transport) instead of raw text.
+                    #  - goal: persistent session-scoped objective via _session/goal.
+                    "_meta": {
+                        "jetbrains": {
+                            "air": {
+                                "version": 1,
+                                "capabilities": ["sessionFailure"],
+                            }
+                        }
+                    },
                 },
                 "clientInfo": {
                     "name": "hermes-agent",
@@ -2482,6 +2540,18 @@ class CopilotACPClient:
         # first so an error or usage-less turn can't echo stale counts.
         usage = result.get("usage") if isinstance(result, dict) else None
         self._last_turn_usage = usage if isinstance(usage, dict) else None
+        # The turn-terminal PromptResponse can carry a typed session failure in
+        # `_meta` (the adapter leaves stopReason: end_turn and attaches the
+        # record here for capable clients). Surface it so an auth/rate-limit
+        # wall at turn end isn't lost between turns.
+        if isinstance(result, dict):
+            response_meta = result.get("_meta")
+            failure = _acp_air_failure(response_meta)
+            if failure is not None:
+                self._surface_air_failure(failure, emit)
+            goal = _acp_goal_snapshot(response_meta)
+            if goal is not None:
+                self._surface_goal(goal, emit)
         return "".join(text_parts), "".join(reasoning_parts)
 
     def _run_prompt(
@@ -2697,6 +2767,63 @@ class CopilotACPClient:
                     name, exc_info=True,
                 )
 
+    def _surface_air_failure(
+        self, failure: dict[str, Any], emit: Any
+    ) -> None:
+        """Render a typed session-failure record in the chat.
+
+        claude-agent-acp sends these as opt-in ``session_info_update`` (and on
+        the turn-terminal ``session/prompt`` response) ``_meta`` records. They
+        are durable transcript entries -- a rate-limit or auth wall, not a
+        throwaway banner -- so surface them as a labelled line rather than
+        swallowing them into the normal text stream.
+
+        Defensive: a malformed record is logged and dropped, never raised.
+        """
+        try:
+            severity = str(failure.get("severity") or "error").strip().lower()
+            title = str(failure.get("title") or "").strip()
+            if not title:
+                return
+            category = str(failure.get("category") or "unknown").strip()
+            tag = "⚠️" if severity == "warning" else "⛔"
+            line = f"\n{tag} Claude {category}: {title}\n"
+            logger.info("ACP sessionFailure (%s/%s): %s", category, severity, title)
+            # Prefer the live emit channel so it appears during the turn; the
+            # reasoning_parts fallback is owned by the prompt loop and may be
+            # None on standalone notifications.
+            if emit is not None:
+                try:
+                    emit("reasoning", line)
+                except Exception:
+                    logger.debug("emit raised on air failure", exc_info=True)
+        except Exception:
+            logger.debug("malformed air failure record", exc_info=True)
+
+    def _surface_goal(self, goal: dict[str, Any], emit: Any) -> None:
+        """Render the agent's persistent goal snapshot in the chat.
+
+        claude-agent-acp publishes this on ``session_info_update`` under
+        ``_meta.goal``; a cleared goal arrives as ``goal: null`` (handled by the
+        caller, which only calls us for a present dict). It is the long-running
+        objective that can drive further autonomous work, distinct from the
+        current prompt turn.
+        """
+        try:
+            objective = str(goal.get("objective") or "").strip()
+            status = str(goal.get("status") or "active").strip()
+            if not objective:
+                return
+            line = f"\n🎯 Goal [{status}]: {objective}\n"
+            logger.info("ACP goal [%s]: %s", status, objective)
+            if emit is not None:
+                try:
+                    emit("reasoning", line)
+                except Exception:
+                    logger.debug("emit raised on goal", exc_info=True)
+        except Exception:
+            logger.debug("malformed goal record", exc_info=True)
+
     def _remember_tool_name(self, update: dict[str, Any]) -> None:
         """Cache a streamed tool call's ``toolName`` against its call id.
 
@@ -2824,6 +2951,25 @@ class CopilotACPClient:
                     self._emit_tool_lifecycle(call_id, tool_lines)
                     if emit is not None:
                         _stream_tool_line(call_id, tool_lines, emit)
+            return True
+
+        if method == "session/info_update":
+            # Carrier for claude-agent-acp's opt-in extensions: typed session
+            # failures (0.68+) and the goal snapshot (0.66+). Both ride on
+            # `_meta` here, mirroring the same keys that land on the
+            # session/prompt response _meta. The capability is negotiated at
+            # initialize; absent negotiation the adapter never sends these.
+            params = msg.get("params") or {}
+            update = params.get("update") or {}
+            meta = update.get("_meta")
+            if not isinstance(meta, dict):
+                return True
+            failure = _acp_air_failure(meta)
+            if failure is not None:
+                self._surface_air_failure(failure, emit)
+            goal = _acp_goal_snapshot(meta)
+            if goal is not None:
+                self._surface_goal(goal, emit)
             return True
 
         if process.stdin is None:

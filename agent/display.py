@@ -940,7 +940,13 @@ def extract_edit_diff(
     snapshot: LocalEditSnapshot | None = None,
 ) -> str | None:
     """Extract a unified diff from a file-edit tool result."""
-    if tool_name == "patch" and result:
+    # A result that already carries its own unified diff is authoritative --
+    # prefer it over reconstructing one from a filesystem snapshot. Hermes'
+    # `patch` sets this; so does a native ACP agent's edit, whose diff arrives
+    # on the wire (see `_acp_tool_result_text` in agent/copilot_acp_client.py).
+    # Hermes' own `write_file` never sets `diff`, so it still falls through to
+    # the snapshot path below.
+    if tool_name in {"patch", "write_file"} and result:
         data = safe_json_loads(result)
         if isinstance(data, dict):
             diff = data.get("diff")

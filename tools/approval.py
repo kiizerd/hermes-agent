@@ -3762,6 +3762,38 @@ def _should_skip_container_guards(env_type: str, has_host_access: bool = False) 
     return env_type in ("singularity", "modal", "daytona", "vercel_sandbox")
 
 
+def check_command_floors(command: str) -> dict | None:
+    """Run the two unbypassable floors over a shell command.
+
+    Returns a block result when ``command`` hits the hardline blocklist or a
+    user-defined ``approvals.deny`` rule, else ``None``.
+
+    Split out of :func:`check_dangerous_command` so a caller that legitimately
+    skips the approval *prompt* can still apply the floors that the ``--yolo``
+    bypass itself has never skipped. The concrete caller is an ACP session
+    negotiated into ``bypassPermissions`` (see
+    ``agent/copilot_acp_client.py``): that mode is the protocol-level
+    equivalent of ``--yolo``, so it must land on the same side of this line —
+    no ceremony, but no wiping the disk or powering the box off either.
+
+    Keeping ONE definition is the point: a hardline pattern or deny rule added
+    later covers both entry points with no second edit.
+    """
+    is_hardline, hardline_desc = detect_hardline_command(command)
+    if is_hardline:
+        logger.warning("Hardline block: %s (command: %s)",
+                       hardline_desc, command[:200])
+        return _hardline_block_result(hardline_desc, command)
+
+    deny_pattern = _match_user_deny_rule(command)
+    if deny_pattern is not None:
+        logger.warning("User deny rule %r blocked command: %s",
+                       deny_pattern, command[:200])
+        return _user_deny_block_result(deny_pattern)
+
+    return None
+
+
 def check_dangerous_command(command: str, env_type: str,
                             approval_callback=None,
                             has_host_access: bool = False) -> dict:
@@ -3783,24 +3815,15 @@ def check_dangerous_command(command: str, env_type: str,
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
         return {"approved": True, "message": None}
 
-    # Hardline floor: commands with no recovery path (rm -rf /, mkfs, dd
-    # to raw device, shutdown/reboot, fork bomb, kill -1) are blocked
-    # unconditionally, BEFORE the yolo bypass.  Opting into yolo is
-    # trusting the agent with your files and services, not trusting it
-    # to wipe the disk or power the box off.
-    is_hardline, hardline_desc = detect_hardline_command(command)
-    if is_hardline:
-        logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
-        return _hardline_block_result(hardline_desc, command)
-
-    # User-defined deny rules (approvals.deny in config.yaml): like the
-    # hardline floor, these fire BEFORE the yolo bypass — a deny rule is the
-    # user saying "never, even under yolo".
-    deny_pattern = _match_user_deny_rule(command)
-    if deny_pattern is not None:
-        logger.warning("User deny rule %r blocked command: %s",
-                       deny_pattern, command[:200])
-        return _user_deny_block_result(deny_pattern)
+    # Hardline floor (rm -rf /, mkfs, dd to raw device, shutdown/reboot, fork
+    # bomb, kill -1) and the user's own approvals.deny rules, both blocking
+    # unconditionally and BEFORE the yolo bypass below. Opting into yolo is
+    # trusting the agent with your files and services, not trusting it to wipe
+    # the disk or power the box off; a deny rule is the user saying "never,
+    # even under yolo". See check_command_floors for why they live apart.
+    floor_block = check_command_floors(command)
+    if floor_block is not None:
+        return floor_block
 
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.

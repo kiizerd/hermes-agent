@@ -77,18 +77,23 @@ def pinned_approval_env(monkeypatch):
         approval._session_approved.update(session)
 
 
-def make_client() -> CopilotACPClient:
+def make_client(applied_mode: str = "") -> CopilotACPClient:
     """A client with only the state the message handler reads.
 
     ``__init__`` resolves the ACP command from the environment and can spawn a
-    real agent, so it is deliberately skipped; the two attributes seeded here
-    are the ones ``_handle_server_message`` touches (the toolName cache and the
+    real agent, so it is deliberately skipped; the attributes seeded here are
+    the ones ``_handle_server_message`` touches (the toolName cache, the
     weakref back to the owning agent, which stays unbound so the tool-card
-    callbacks no-op).
+    callbacks no-op, and the negotiated permission mode).
+
+    ``applied_mode`` defaults to "" -- the same value ``__init__`` sets and the
+    same value a session that never completed ``session/set_mode`` keeps -- so
+    every pre-existing test in this file exercises the fully-gated path.
     """
     client = object.__new__(CopilotACPClient)
     client._tool_names_by_call_id = {}
     client._agent_ref = None
+    client._applied_mode = applied_mode
     return client
 
 
@@ -219,6 +224,18 @@ def allowlist(monkeypatch, patterns) -> None:
     monkeypatch.setattr(
         approval, "_get_approval_config",
         lambda: {"mode": "manual", "tool_allowlist": list(patterns)},
+    )
+
+
+def deny_rules(monkeypatch, patterns, tool_allowlist=()) -> None:
+    """Pin approvals.deny (and optionally tool_allowlist) for the handler."""
+    monkeypatch.setattr(
+        approval, "_get_approval_config",
+        lambda: {
+            "mode": "manual",
+            "deny": list(patterns),
+            "tool_allowlist": list(tool_allowlist),
+        },
     )
 
 
@@ -465,6 +482,110 @@ class TestToolNameEnrichment:
         safe["toolCallId"] = "toolu_bash"
         assert approved(run_permission(safe, client=client))
         assert calls == []
+
+
+class TestBypassPermissionsMode:
+    """``bypassPermissions`` negotiated via session/set_mode is the
+    protocol-level equivalent of ``--yolo``: it removes the CEREMONY (approval
+    cards, and the fail-closed denial that fires when no human is attached),
+    but not the two floors ``--yolo`` itself has never removed -- the hardline
+    blocklist and the user's own ``approvals.deny`` rules.
+    """
+
+    def test_non_shell_tools_skip_the_gate(self, monkeypatch):
+        calls = gate_spy(monkeypatch)
+        client = make_client("bypassPermissions")
+        assert approved(run_permission(write_tool("C:/tmp/probe-a.txt"), client=client))
+        assert approved(run_permission(skill_manage_tool(), client=client))
+        assert calls == [], "bypass must not consult the non-shell gate"
+
+    def test_dangerous_shell_no_longer_draws_a_card(self, monkeypatch):
+        """`rm -rf ./build` is DANGEROUS but not hardline.
+
+        The assertion is on GATE CONSULTATION, not on the approved flag:
+        ``check_dangerous_command`` runs its gate without
+        ``fail_closed_when_no_human``, so with no human attached it
+        auto-approves anyway and the outcome would measure the ambient
+        environment rather than the mode.
+        """
+        calls = gate_spy(monkeypatch)
+        run_permission(bash("rm -rf ./build"))
+        assert len(calls) == 1, "default mode consults the gate"
+        assert approved(
+            run_permission(bash("rm -rf ./build"), client=make_client("bypassPermissions"))
+        )
+        assert len(calls) == 1, "bypass must not add a second gate call"
+
+    def test_hardline_floor_survives(self, monkeypatch):
+        calls = gate_spy(monkeypatch)
+        client = make_client("bypassPermissions")
+        for cmd in ("rm -rf /", "mkfs.ext4 /dev/sda1", "shutdown -h now"):
+            assert not approved(run_permission(bash(cmd), client=client)), cmd
+            assert not approved(
+                run_permission(execute_unnamed(cmd), client=client)
+            ), f"unnamed execute: {cmd}"
+        assert calls == [], "hardline decisions never reach the gate"
+
+    def test_user_deny_rule_survives(self, monkeypatch):
+        deny_rules(monkeypatch, ["*git push --force*"])
+        client = make_client("bypassPermissions")
+        assert not approved(
+            run_permission(bash("git push --force origin main"), client=client)
+        )
+        # A command the rule does not match still runs.
+        assert approved(run_permission(bash("git status --short"), client=client))
+
+    def test_safe_shell_needs_no_card_either(self, monkeypatch):
+        calls = gate_spy(monkeypatch)
+        client = make_client("bypassPermissions")
+        assert approved(run_permission(bash("ls -la"), client=client))
+        assert calls == []
+
+
+class TestAcceptEditsMode:
+    """``acceptEdits`` auto-approves file edits and nothing else -- shell and
+    non-edit tools keep the full gate, matching what the mode means to the
+    sub-agent that negotiated it."""
+
+    def test_edit_kind_auto_approves(self, monkeypatch):
+        calls = gate_spy(monkeypatch)
+        client = make_client("acceptEdits")
+        assert approved(run_permission(write_tool("C:/tmp/probe-a.txt"), client=client))
+        assert approved(run_permission(write_tool("C:/tmp/probe-b.txt"), client=client))
+        assert calls == []
+
+    def test_non_edit_tools_still_gate(self, monkeypatch):
+        calls = gate_spy(monkeypatch)
+        client = make_client("acceptEdits")
+        assert not approved(run_permission(skill_manage_tool(), client=client))
+        assert len(calls) == 1
+
+    def test_shell_is_not_bypassed(self, monkeypatch):
+        calls = gate_spy(monkeypatch)
+        client = make_client("acceptEdits")
+        run_permission(bash("rm -rf ./build"), client=client)
+        assert len(calls) == 1, "shell keeps the dangerous-command gate"
+        assert not approved(run_permission(bash("rm -rf /"), client=client))
+
+    def test_tool_allowlist_still_applies(self, monkeypatch):
+        allowlist(monkeypatch, ["copilot-acp:skill_manage"])
+        calls = gate_spy(monkeypatch)
+        client = make_client("acceptEdits")
+        assert approved(run_permission(skill_manage_tool(), client=client))
+        assert calls == []
+
+
+class TestUnwidenedModes:
+    def test_default_and_plan_gate_exactly_as_before(self, monkeypatch):
+        """Only the two modes above change anything; "" (never negotiated),
+        "default" and "plan" must keep drawing a card per call."""
+        calls = gate_spy(monkeypatch)
+        for mode in ("", "default", "plan"):
+            client = make_client(mode)
+            assert not approved(
+                run_permission(write_tool("C:/tmp/x.txt"), client=client)
+            ), mode
+        assert len(calls) == 3
 
 
 class TestToolNameCacheLifetime:

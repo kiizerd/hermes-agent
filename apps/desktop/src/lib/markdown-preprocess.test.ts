@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { preprocessMarkdown } from './markdown-preprocess'
 
-const openFenceLines = (text: string): string[] =>
-  text.split('\n').filter(line => /^\s*(?:```|~~~)/.test(line))
+const openFenceLines = (text: string): string[] => text.split('\n').filter(line => /^\s*(?:```|~~~)/.test(line))
 
 describe('preprocessMarkdown streaming fences', () => {
   it('keeps an untagged fence intact at every streaming prefix', () => {
@@ -24,6 +23,7 @@ describe('preprocessMarkdown streaming fences', () => {
       '',
       'Done.'
     ].join('\n')
+
     // Start one character into the body: an opener with a still-empty body is
     // dropped on purpose, so there is no fence to assert on yet.
     const firstBodyChar = full.indexOf('```') + 5
@@ -38,9 +38,7 @@ describe('preprocessMarkdown streaming fences', () => {
   it('does not demote an untagged streaming fence to prose', () => {
     // A truncated body has no code signals yet, so the prose heuristic used to
     // strip the fence and then restore it once real code arrived.
-    const streaming = ['```', 'first line of output', 'second line of output', 'third line of output'].join(
-      '\n'
-    )
+    const streaming = ['```', 'first line of output', 'second line of output', 'third line of output'].join('\n')
 
     expect(openFenceLines(preprocessMarkdown(streaming)).length).toBeGreaterThan(0)
   })
@@ -60,9 +58,7 @@ describe('preprocessMarkdown streaming fences', () => {
     // plain prose in a bare fence constantly, and once the block is closed the
     // whole body is available to judge, so the heuristic is trusted again.
     const rendered = preprocessMarkdown(
-      ['```', 'This is a sentence of prose.', 'And another sentence here.', 'A third sentence too.', '```'].join(
-        '\n'
-      )
+      ['```', 'This is a sentence of prose.', 'And another sentence here.', 'A third sentence too.', '```'].join('\n')
     )
 
     expect(openFenceLines(rendered).length).toBe(0)
@@ -72,9 +68,7 @@ describe('preprocessMarkdown streaming fences', () => {
     // Fix B is scoped to untagged fences; an explicit prose tag is still
     // trusted, closed or not.
     const rendered = preprocessMarkdown(
-      ['```text', 'This is a sentence of prose.', 'And another sentence here.', 'A third sentence too.'].join(
-        '\n'
-      )
+      ['```text', 'This is a sentence of prose.', 'And another sentence here.', 'A third sentence too.'].join('\n')
     )
 
     expect(openFenceLines(rendered).length).toBe(0)

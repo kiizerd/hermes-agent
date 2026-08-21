@@ -62,6 +62,7 @@ export function BridgeModePill({ compact = false, disabled }: { compact?: boolea
   }
 
   const noSession = !runtimeId
+
   // A draft shows its own pending pick. `mode.value` is the LAST session's
   // mirror (nothing clears it on New Chat, which is also what keeps
   // `available` true for the draft at all), so it is the fallback, not the
@@ -69,6 +70,7 @@ export function BridgeModePill({ compact = false, disabled }: { compact?: boolea
   const current = noSession
     ? draftMode || mode.value || BRIDGE_SYSTEM_PROMPT_MODE
     : mode.value || BRIDGE_SYSTEM_PROMPT_MODE
+
   const isNative = current === NATIVE_SYSTEM_PROMPT_MODE
   const label = isNative ? copy.bridgeModeNativeLabel : copy.bridgeModeBridgeLabel
 

@@ -2469,7 +2469,9 @@ export const zh: Translations = {
     bridgeModeBridgeLabel: '桥接',
     bridgeModeNativeLabel: '原生',
     bridgeModeTitle: mode =>
-      mode === '原生' ? '原生 — 使用 Hermes 自身的系统提示词,而非 Claude Code 的' : '桥接 — Hermes 指令附加在 Claude Code 自身的系统提示词之上',
+      mode === '原生'
+        ? '原生 — 使用 Hermes 自身的系统提示词,而非 Claude Code 的'
+        : '桥接 — Hermes 指令附加在 Claude Code 自身的系统提示词之上',
     bridgeModeDraft: mode => `${mode} — 点击可切换,发送消息后为本次对话锁定`,
     bridgeModeLocked: mode => `${mode} — 已为本次对话锁定,新建对话可切换`,
     bridgeModeFailed: '无法更改系统提示词模式',

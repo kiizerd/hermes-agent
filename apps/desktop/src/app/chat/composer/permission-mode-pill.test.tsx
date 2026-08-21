@@ -4,6 +4,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import type { AcpPermissionState } from '@/app/types'
+import type * as AcpPermission from '@/lib/acp-permission'
 import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
 import { EMPTY_ACP_SYSTEM_PROMPT_MODE } from '@/lib/acp-system-prompt-mode'
 
@@ -12,7 +13,7 @@ import { PermissionModePill } from './permission-mode-pill'
 const setSessionPermissionMode = vi.hoisted(() => vi.fn(async () => 'ok'))
 
 vi.mock('@/lib/acp-permission', async importOriginal => ({
-  ...(await importOriginal<typeof import('@/lib/acp-permission')>()),
+  ...(await importOriginal<typeof AcpPermission>()),
   setSessionPermissionMode
 }))
 

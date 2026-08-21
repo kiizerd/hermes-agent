@@ -57,7 +57,8 @@ function renderPill(state: AcpPermissionState, runtimeId: null | string = 'runti
     $provider: atom(''),
     $reasoningEffort: atom(''),
     $runtimeId: atom(runtimeId),
-    $storedId: atom(null)
+    $storedId: atom(null),
+    $turnStartedAt: atom(null)
   }
 
   return render(

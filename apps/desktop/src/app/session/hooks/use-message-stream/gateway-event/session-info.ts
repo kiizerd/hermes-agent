@@ -1,3 +1,5 @@
+import { normalizeAcpPermission } from '@/lib/acp-permission'
+import { normalizeAcpSystemPromptMode } from '@/lib/acp-system-prompt-mode'
 import { normalizePersonalityValue } from '@/lib/chat-runtime'
 import { modelOptionsQueryKey } from '@/lib/model-options'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
@@ -13,6 +15,8 @@ import {
   $sessions,
   sessionMatchesStoredId,
   setActiveSessionId,
+  setCurrentAcpPermission,
+  setCurrentAcpSystemPromptMode,
   setCurrentBranch,
   setCurrentCwdTransient,
   setCurrentFastMode,
@@ -252,6 +256,17 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
 
       if (typeof payload?.yolo === 'boolean') {
         setYoloActive(payload.yolo)
+      }
+
+      // The draft composer's fallback. A live session renders from its own
+      // slice (statePatch below); this keeps the pill correct on a fresh
+      // chat, which has no slice until its first turn.
+      if (payload?.acp_permission !== undefined) {
+        setCurrentAcpPermission(normalizeAcpPermission(payload.acp_permission))
+      }
+
+      if (payload?.acp_system_prompt_mode !== undefined) {
+        setCurrentAcpSystemPromptMode(normalizeAcpSystemPromptMode(payload.acp_system_prompt_mode))
       }
     }
 

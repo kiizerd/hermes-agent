@@ -93,14 +93,27 @@ function useCodePlugin(): CodePlugin | null {
 }
 
 // Replaces Streamdown's `parseIncompleteMarkdown` (full-text remend per
-// flush) with a tail-bounded repair. Must stay module-scope so the prop
-// identity is stable across renders.
-function preprocessWithTailRepair(text: string): string {
+// flush) with a tail-bounded repair. Two fixed module-scope variants (rather
+// than one closure recreated per render) so `preprocess` prop identity stays
+// stable within a streaming/complete state — only the *choice* between them
+// flips, and only when `isStreaming` itself flips (once per message, not per
+// token). `complete` mirrors `!isStreaming`: only once a message has finished
+// streaming is an untagged/unclosed fence's body trustworthy input to the
+// prose-vs-code heuristic (see `preprocessMarkdown`'s `complete` option).
+function preprocessWithTailRepair(text: string, complete: boolean): string {
   try {
-    return tailBoundedRemend(preprocessMarkdown(text))
+    return tailBoundedRemend(preprocessMarkdown(text, { complete }))
   } catch {
     return text
   }
+}
+
+function preprocessStreaming(text: string): string {
+  return preprocessWithTailRepair(text, false)
+}
+
+function preprocessComplete(text: string): string {
+  return preprocessWithTailRepair(text, true)
 }
 
 function useOpenMediaFile(path: string) {
@@ -681,7 +694,7 @@ function MarkdownTextSurface({
         parseIncompleteMarkdown={false}
         parseMarkdownIntoBlocksFn={parseMarkdownIntoBlocksCached}
         plugins={plugins}
-        preprocess={preprocessWithTailRepair}
+        preprocess={isStreaming ? preprocessStreaming : preprocessComplete}
       />
     </ErrorBoundary>
   )

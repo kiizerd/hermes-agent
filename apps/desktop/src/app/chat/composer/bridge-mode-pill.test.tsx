@@ -52,7 +52,8 @@ function renderPill(state: AcpSystemPromptModeState, runtimeId: null | string = 
     $provider: atom(''),
     $reasoningEffort: atom(''),
     $runtimeId: atom(runtimeId),
-    $storedId: atom(null)
+    $storedId: atom(null),
+    $turnStartedAt: atom(null)
   }
 
   return render(

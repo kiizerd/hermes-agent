@@ -69,6 +69,11 @@ export type GatewayEventPayload = {
   fast?: boolean
   approval_mode?: string
   yolo?: boolean
+  // acp_permission / acp_system_prompt_mode — per-session ACP pill state,
+  // normalized by normalizeAcpPermission / normalizeAcpSystemPromptMode
+  // (each accepts unknown and defaults on a malformed payload).
+  acp_permission?: unknown
+  acp_system_prompt_mode?: unknown
   running?: boolean
   turn_started_at?: number | null
   cwd?: string

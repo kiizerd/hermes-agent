@@ -8,6 +8,7 @@ import { revealTreePane } from '@/components/pane-shell/tree/store'
 import { setWorkspaceScope } from '@/components/pane-shell/workspace-scope'
 import { deleteSession, getAllSessionMessages, getLatestSessionMessages, setSessionArchived } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { setSessionSystemPromptMode } from '@/lib/acp-system-prompt-mode'
 import {
   type ChatMessage,
   preserveLocalAssistantErrors,
@@ -18,7 +19,6 @@ import {
 } from '@/lib/chat-messages'
 import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { recoverInFlightTurnJournal } from '@/lib/inflight-turn-journal'
-import { setSessionSystemPromptMode } from '@/lib/acp-system-prompt-mode'
 import { setSessionYolo } from '@/lib/yolo-session'
 import { $clarifyRequests } from '@/store/clarify'
 import { migrateSessionDraft } from '@/store/composer'

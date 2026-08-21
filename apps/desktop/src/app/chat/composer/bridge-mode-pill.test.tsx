@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import type { AcpSystemPromptModeState } from '@/app/types'
 import { EMPTY_ACP_PERMISSION } from '@/lib/acp-permission'
+import type * as AcpSystemPromptMode from '@/lib/acp-system-prompt-mode'
 import { EMPTY_ACP_SYSTEM_PROMPT_MODE } from '@/lib/acp-system-prompt-mode'
 import { $draftAcpSystemPromptMode, setDraftAcpSystemPromptMode } from '@/store/session'
 
@@ -13,7 +14,7 @@ import { BridgeModePill } from './bridge-mode-pill'
 const setSessionSystemPromptMode = vi.hoisted(() => vi.fn(async () => 'ok'))
 
 vi.mock('@/lib/acp-system-prompt-mode', async importOriginal => ({
-  ...(await importOriginal<typeof import('@/lib/acp-system-prompt-mode')>()),
+  ...(await importOriginal<typeof AcpSystemPromptMode>()),
   setSessionSystemPromptMode
 }))
 

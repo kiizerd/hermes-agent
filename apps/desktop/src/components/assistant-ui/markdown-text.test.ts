@@ -78,12 +78,27 @@ describe('preprocessMarkdown', () => {
     expect(output).toContain('const value = 1;')
   })
 
-  it('demotes dangling prose fences', () => {
+  it('keeps dangling untagged fences as code while still streaming', () => {
     const input = ['```', '- Pure white (`#ffffff`)', '- Ambient dropped to 0.18'].join('\n')
     const output = preprocessMarkdown(input)
 
+    expect(output).toContain('```')
+  })
+
+  it('demotes dangling prose fences once the message is complete', () => {
+    const input = ['```', '- Pure white (`#ffffff`)', '- Ambient dropped to 0.18'].join('\n')
+    const output = preprocessMarkdown(input, { complete: true })
+
     expect(output).not.toContain('```')
     expect(output).toContain('- Pure white (`#ffffff`)')
+  })
+
+  it('keeps dangling untagged real code fences as code even once complete', () => {
+    const input = ['```', 'const value = 1;', 'export default value;'].join('\n')
+    const output = preprocessMarkdown(input, { complete: true })
+
+    expect(output).toContain('```')
+    expect(output).toContain('const value = 1;')
   })
 
   it('autolinks raw urls in prose', () => {

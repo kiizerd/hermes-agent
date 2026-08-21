@@ -95,7 +95,7 @@ function hasCloseFenceLine(body: string, marker: string): boolean {
   return false
 }
 
-function scrubBacktickNoise(text: string): string {
+function scrubBacktickNoise(text: string, complete: boolean): string {
   const balancedFenceRe = /(^|\n)([ \t]*)(`{3,}|~{3,})([^\n]*)\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g
   const protectedRanges: { end: number; start: number }[] = []
   let match: RegExpExecArray | null
@@ -127,10 +127,13 @@ function scrubBacktickNoise(text: string): string {
     }
 
     const infoValid = !info || Boolean(sanitizeLanguageTag(info))
-    // The prose check only applies to the tagged form. An untagged streaming
-    // fence has a truncated body, and a truncated body legitimately reads as
-    // prose (its code signals haven't arrived yet), so the heuristic misfires.
-    const looksLikeProse = Boolean(info) && isLikelyProseFence(info, body)
+    // The prose check only applies to the tagged form while still streaming.
+    // An untagged streaming fence has a truncated body, and a truncated body
+    // legitimately reads as prose (its code signals haven't arrived yet), so
+    // the heuristic misfires mid-stream. Once the caller confirms the text is
+    // complete (`complete`), a bare fence's full body is trustworthy input to
+    // the same heuristic.
+    const looksLikeProse = (complete || Boolean(info)) && isLikelyProseFence(info, body)
 
     if (!hasCloseFenceLine(body, marker) && infoValid && !looksLikeProse) {
       protectedRanges.push({ end: text.length, start })
@@ -531,7 +534,7 @@ function isMathFence(language: string): boolean {
   return MATH_FENCE_LANGUAGES.has(language.toLowerCase())
 }
 
-function normalizeFenceBlocks(text: string): string {
+function normalizeFenceBlocks(text: string, complete: boolean): string {
   const sourceLines = text.split('\n')
   const out: string[] = []
   let index = 0
@@ -591,12 +594,14 @@ function normalizeFenceBlocks(text: string): string {
         continue
       }
 
-      // Untagged fences skip the prose check while the block is still open:
-      // the body is truncated mid-stream, so the heuristic flips it to prose
-      // on one chunk and back to code on the next as code signals arrive. A
-      // fence defaults to code; the closed-block path below still reclassifies
-      // it once the whole body is in.
-      if (infoRaw && isLikelyProseFence(infoRaw, body)) {
+      // Untagged fences skip the prose check while the block is still open
+      // AND still streaming: the body is truncated mid-stream, so the
+      // heuristic flips it to prose on one chunk and back to code on the next
+      // as code signals arrive. A fence defaults to code while streaming; the
+      // closed-block path below still reclassifies it once the whole body is
+      // in. Once the caller confirms the text is complete (`complete`), an
+      // untagged fence's body is final and the same heuristic applies.
+      if ((complete || infoRaw) && isLikelyProseFence(infoRaw, body)) {
         pushProseFence(out, indent, infoRaw, bodyLines)
       } else if (isMathFence(language)) {
         // Streaming math fence — rewrite the language tag to "math".
@@ -674,10 +679,20 @@ function splitTrailingOpenFence(part: string): { fence: string; prose: string } 
   return { fence: '', prose: part }
 }
 
-export function preprocessMarkdown(text: string): string {
+/**
+ * @param complete Set when `text` is the final, non-streaming form of the
+ *   message (a completed turn, a static file, a re-render after the stream
+ *   ended) rather than a live delta. Untagged/unclosed fences only run the
+ *   prose-vs-code heuristic against their full body when `complete` is true —
+ *   during streaming a dangling body is truncated and the heuristic misreads
+ *   it, which is why the default stays `false`. See `scrubBacktickNoise` and
+ *   `normalizeFenceBlocks` for where this actually changes behavior.
+ */
+export function preprocessMarkdown(text: string, opts?: { complete?: boolean }): string {
+  const complete = opts?.complete ?? false
   const cleaned = text.replace(REASONING_BLOCK_RE, '').replace(PREVIEW_MARKER_RE, '')
-  const scrubbed = scrubBacktickNoise(cleaned)
-  const normalizedFences = normalizeFenceBlocks(scrubbed)
+  const scrubbed = scrubBacktickNoise(cleaned, complete)
+  const normalizedFences = normalizeFenceBlocks(scrubbed, complete)
   const strippedEmptyFences = stripEmptyFenceBlocks(normalizedFences)
 
   return strippedEmptyFences

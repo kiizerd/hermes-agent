@@ -94,6 +94,10 @@ def make_client(applied_mode: str = "") -> CopilotACPClient:
     client._tool_names_by_call_id = {}
     client._agent_ref = None
     client._applied_mode = applied_mode
+    # Per-turn tally of `tool_call` notifications, seeded because the handler
+    # increments it in place. ``__init__`` zeroes it and ``_prompt_session``
+    # re-zeroes it per turn; neither runs here.
+    client._last_turn_tool_calls = 0
     return client
 
 
@@ -250,6 +254,27 @@ def gate_spy(monkeypatch) -> list[dict]:
         return real(**kwargs)
 
     monkeypatch.setattr(approval, "_run_approval_gate", spy)
+    return calls
+
+
+def shell_gate_spy(monkeypatch) -> list[tuple]:
+    """Wrap the real ``check_all_command_guards``, recording positional args.
+
+    The shell branch does NOT reach ``_run_approval_gate`` the way the
+    non-shell branch does: ``check_all_command_guards`` carries its own
+    presentation path (``_present_with_selected_transport`` /
+    ``_await_gateway_decision``) rather than delegating to that primitive, so
+    ``gate_spy`` above is blind to shell traffic. This is the shell-side
+    equivalent seam -- consulted means "the full guard stack ran".
+    """
+    real = approval.check_all_command_guards
+    calls: list[tuple] = []
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(approval, "check_all_command_guards", spy)
     return calls
 
 
@@ -503,12 +528,11 @@ class TestBypassPermissionsMode:
         """`rm -rf ./build` is DANGEROUS but not hardline.
 
         The assertion is on GATE CONSULTATION, not on the approved flag:
-        ``check_dangerous_command`` runs its gate without
-        ``fail_closed_when_no_human``, so with no human attached it
-        auto-approves anyway and the outcome would measure the ambient
-        environment rather than the mode.
+        the shell guard runs without ``fail_closed_when_no_human``, so with no
+        human attached it auto-approves anyway and the outcome would measure
+        the ambient environment rather than the mode.
         """
-        calls = gate_spy(monkeypatch)
+        calls = shell_gate_spy(monkeypatch)
         run_permission(bash("rm -rf ./build"))
         assert len(calls) == 1, "default mode consults the gate"
         assert approved(
@@ -561,7 +585,7 @@ class TestAcceptEditsMode:
         assert len(calls) == 1
 
     def test_shell_is_not_bypassed(self, monkeypatch):
-        calls = gate_spy(monkeypatch)
+        calls = shell_gate_spy(monkeypatch)
         client = make_client("acceptEdits")
         run_permission(bash("rm -rf ./build"), client=client)
         assert len(calls) == 1, "shell keeps the dangerous-command gate"
@@ -573,6 +597,226 @@ class TestAcceptEditsMode:
         client = make_client("acceptEdits")
         assert approved(run_permission(skill_manage_tool(), client=client))
         assert calls == []
+
+
+def pin_mode(monkeypatch, mode: str, tool_allowlist=()) -> None:
+    """Pin ``approvals.mode``. Note the shipped DEFAULT is ``smart``, not
+    ``manual`` (``hermes_cli/config_defaults.py``), so a test that wants
+    manual behaviour must say so explicitly rather than omit the key."""
+    monkeypatch.setattr(
+        approval, "_get_approval_config",
+        lambda: {"mode": mode, "tool_allowlist": list(tool_allowlist)},
+    )
+
+
+def with_human(monkeypatch) -> None:
+    """Make the approval stack believe a human could be prompted.
+
+    Smart approval is deliberately skipped when nobody is watching (there is
+    no attention to save, and on the fail-closed tool path it would widen what
+    an unattended session may do), so every test that expects the guardian to
+    run has to supply a human context. ``HERMES_EXEC_ASK`` is the cheapest of
+    the three the stack accepts.
+    """
+    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+
+
+def gate_stub(monkeypatch, approved_result: bool = False) -> list[dict]:
+    """REPLACE ``_run_approval_gate`` with a recorder that answers instantly.
+
+    ``gate_spy`` wraps the real gate, which is fine with no human attached
+    because it then returns through the non-interactive branch. Once a test
+    supplies a human context (see ``with_human``) the real gate would try to
+    present a card and block, so those tests stub it out instead of wrapping.
+    """
+    calls: list[dict] = []
+
+    def stub(**kwargs):
+        calls.append(kwargs)
+        return {"approved": approved_result, "message": None}
+
+    monkeypatch.setattr(approval, "_run_approval_gate", stub)
+    return calls
+
+
+def smart_mode(monkeypatch, verdict: str) -> list[tuple]:
+    """``mode: smart`` + a human present + a stubbed tool guardian.
+
+    Returns the list the stub records ``(tool_name, target)`` into, so a test
+    can assert the guardian was consulted (or was NOT) rather than only
+    checking the outcome. The real guardian makes an LLM call, so it is never
+    left in place here.
+    """
+    pin_mode(monkeypatch, "smart")
+    with_human(monkeypatch)
+    seen: list[tuple] = []
+
+    def stub(tool_name, target, description):
+        seen.append((tool_name, target))
+        return verdict
+
+    monkeypatch.setattr(approval, "_smart_approve_tool", stub)
+    return seen
+
+
+class TestSmartApprovalNonShellTools:
+    """``approvals.mode: smart`` reaches ACP's non-shell tool calls.
+
+    Phase 2.5 (the aux-LLM guardian) lives inside
+    ``check_all_command_guards`` and takes a command string, so a tool call
+    could never reach it. The handler now calls ``smart_tool_verdict``
+    explicitly for the non-shell branch.
+    """
+
+    def test_approve_verdict_skips_the_card(self, monkeypatch):
+        seen = smart_mode(monkeypatch, "approve")
+        calls = gate_stub(monkeypatch)
+        assert approved(run_permission(write_tool("C:/tmp/report.md")))
+        assert calls == [], "an approved verdict must not also draw a card"
+        assert seen == [("Write", "C:/tmp/report.md")]
+
+    def test_deny_verdict_blocks_without_a_card(self, monkeypatch):
+        smart_mode(monkeypatch, "deny")
+        calls = gate_stub(monkeypatch, approved_result=True)
+        assert not approved(run_permission(write_tool("C:/Users/x/.ssh/config")))
+        assert calls == [], "a denied verdict is final, not a prompt"
+
+    def test_escalate_falls_through_to_the_human_gate(self, monkeypatch):
+        smart_mode(monkeypatch, "escalate")
+        calls = gate_stub(monkeypatch)
+        run_permission(write_tool("C:/tmp/ambiguous.txt"))
+        assert len(calls) == 1, "escalate keeps the pre-existing manual gate"
+
+    def test_manual_mode_never_consults_the_guardian(self, monkeypatch):
+        """``mode: manual`` must behave exactly as it did before this wiring."""
+        pin_mode(monkeypatch, "manual")
+        with_human(monkeypatch)
+        seen: list[tuple] = []
+        monkeypatch.setattr(
+            approval, "_smart_approve_tool",
+            lambda t, g, d: seen.append((t, g)) or "approve",
+        )
+        calls = gate_stub(monkeypatch)
+        run_permission(write_tool("C:/tmp/x.txt"))
+        assert seen == [], "mode: manual must not spend an aux-LLM call"
+        assert len(calls) == 1
+
+    def test_headless_session_never_consults_the_guardian(self, monkeypatch):
+        """No human, no guardian -- even in smart mode.
+
+        The ACP tool gate is fail-closed with nobody attached. Letting the
+        guardian answer there would silently turn a hard denial into an
+        LLM decision for unattended gateway/cron sessions, which is a policy
+        change no one asked for. (The autouse fixture already strips every
+        interactive marker, so this test just asserts the default posture.)
+        """
+        pin_mode(monkeypatch, "smart")
+        seen: list[tuple] = []
+        monkeypatch.setattr(
+            approval, "_smart_approve_tool",
+            lambda t, g, d: seen.append((t, g)) or "approve",
+        )
+        assert not approved(run_permission(write_tool("C:/tmp/x.txt")))
+        assert seen == [], "headless sessions keep the fail-closed gate"
+
+    def test_single_query_never_consults_the_guardian(self, monkeypatch):
+        """`-q` exports HERMES_INTERACTIVE=1 but has nobody to answer.
+
+        Taken at face value it looks attended, so the guardian would run and
+        could pre-empt whatever ``approvals.single_query_mode`` the user set.
+        """
+        pin_mode(monkeypatch, "smart")
+        with_human(monkeypatch)
+        monkeypatch.setattr(
+            approval, "_is_single_query_approval_context", lambda: True,
+        )
+        seen: list[tuple] = []
+        monkeypatch.setattr(
+            approval, "_smart_approve_tool",
+            lambda t, g, d: seen.append((t, g)) or "approve",
+        )
+        run_permission(write_tool("C:/tmp/x.txt"))
+        assert seen == [], "single-query policy is not the guardian's call"
+
+    def test_allowlist_wins_before_the_guardian(self, monkeypatch):
+        """A user's explicit grant must not cost an LLM round-trip."""
+        pin_mode(monkeypatch, "smart", ["copilot-acp:skill_manage"])
+        with_human(monkeypatch)
+        seen: list[tuple] = []
+        monkeypatch.setattr(
+            approval, "_smart_approve_tool",
+            lambda t, g, d: seen.append((t, g)) or "deny",
+        )
+        assert approved(run_permission(skill_manage_tool()))
+        assert seen == [], "allowlisted tools skip the guardian entirely"
+
+    def test_bypass_mode_still_wins_over_smart(self, monkeypatch):
+        seen = smart_mode(monkeypatch, "deny")
+        client = make_client("bypassPermissions")
+        assert approved(run_permission(write_tool("C:/tmp/x.txt"), client=client))
+        assert seen == [], "bypassPermissions short-circuits above the guardian"
+
+
+class TestShellGuardStack:
+    """The shell branch routes through the FULL guard wrapper.
+
+    It used to call ``check_dangerous_command``, the narrower of the two
+    public shell entry points, which silently skipped four guards the
+    identical command got when run through Hermes' own ``terminal`` tool.
+    """
+
+    def test_approvals_mode_off_is_honored(self, monkeypatch):
+        """The concrete user-visible symptom of the old routing.
+
+        ``check_dangerous_command`` never reads ``_get_approval_mode()``, so a
+        user who set ``approvals.mode: off`` was ignored on the ACP path while
+        it worked everywhere else.
+        """
+        pin_mode(monkeypatch, "off")
+        with_human(monkeypatch)
+        assert approved(run_permission(bash("rm -rf ./build")))
+
+    def test_mode_off_does_not_defeat_the_hardline_floor(self, monkeypatch):
+        """`mode: off` is a prompt bypass, not a licence to wipe the disk."""
+        pin_mode(monkeypatch, "off")
+        with_human(monkeypatch)
+        assert not approved(run_permission(bash("rm -rf /")))
+
+    def test_shell_reaches_the_smart_guardian(self, monkeypatch):
+        """Shell smart approval comes free with the wrapper -- Phase 2.5 is
+        inside it -- so it needs no explicit call like the tool branch does."""
+        pin_mode(monkeypatch, "smart")
+        with_human(monkeypatch)
+        seen: list[str] = []
+        monkeypatch.setattr(
+            approval, "_smart_approve",
+            lambda cmd, desc: seen.append(cmd) or "approve",
+        )
+        assert approved(run_permission(bash("rm -rf ./build")))
+        assert seen == ["rm -rf ./build"]
+
+    def test_tirith_now_runs_on_acp_shell(self, monkeypatch):
+        """Content scanning was one of the four guards the old routing skipped.
+
+        Asserted by consultation, not verdict: tirith's own rules are its
+        business, and pinning an expected finding here would be a snapshot of
+        its ruleset rather than a contract about ACP routing.
+        """
+        import tools.tirith_security as tirith
+
+        pin_mode(monkeypatch, "manual")
+        with_human(monkeypatch)
+        seen: list[str] = []
+        # Patched on the SOURCE module, not on ``approval``: the guard imports
+        # it inside the function body (``from tools.tirith_security import
+        # check_command_security``), so there is no name on ``approval`` to
+        # rebind and patching there silently intercepts nothing.
+        monkeypatch.setattr(
+            tirith, "check_command_security",
+            lambda cmd: seen.append(cmd) or {"action": "allow", "findings": []},
+        )
+        run_permission(bash("cat ./notes.txt"))
+        assert seen == ["cat ./notes.txt"], "ACP shell must reach tirith"
 
 
 class TestUnwidenedModes:

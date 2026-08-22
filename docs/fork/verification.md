@@ -95,6 +95,7 @@ observed. The set that gates this fork runs in minutes:
 python -m pytest tests/acp/ \
   tests/agent/test_copilot_acp_client.py \
   tests/agent/test_copilot_acp_approval_routing.py \
+  tests/agent/test_copilot_acp_skill_iterations.py \
   tests/agent/test_copilot_acp_usage.py \
   tests/agent/test_copilot_acp_permission_mode_state.py \
   tests/agent/test_acp_claude_alias_context.py \
@@ -231,6 +232,14 @@ Confirmed identical on a clean `upstream/main` worktree:
 - `test_ping_suppression` — `OSError: [WinError 6]` / `ValueError: I/O operation
   on closed file`. asyncio proactor teardown on Windows.
 - `test_acp_images` — builds a WSL-style `\mnt\c\...` path on native Windows.
+- Anything that calls `Path.symlink_to` — `OSError: [WinError 1314] A required
+  privilege is not held by the client`. Creating a symlink on Windows needs
+  admin or Developer Mode, and this box runs the tests as neither. Confirmed
+  identical on a pristine worktree 2026-08-21. Three in
+  `tests/acp/test_session.py::TestSymlinkAliasNormalization`, two in
+  `tests/tools/test_approval.py::TestDetectDangerousRm` (that pair reads as
+  `rm`-detection failures, which is misleading — the symlink call is in the
+  fixture, not the assertion).
 - Desktop vitest: ~19 failures across `electron/ssh-*`, `desktop-installation`,
   `git-worktree-ops`, `windows-hermes-path`, `stage-native-deps`,
   `markdown-text`. All Windows-path shaped, e.g. a test asserting

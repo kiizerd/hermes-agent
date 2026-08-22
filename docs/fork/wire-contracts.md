@@ -74,18 +74,77 @@ stream: `_remember_tool_name()` (`:2298`) / `_recall_tool_name()` (`:2336`).
 Capture a real permission RPC from `agent.log` (`ACP permission requested: … to
 execute`) and shape the probe from that, not from what the display helpers emit.
 
+### `tool_call` announces; `tool_call_update` only refines
+
+One `sessionUpdate: "tool_call"` per call the sub-agent makes. Every later
+`tool_call_update` for that same `toolCallId` is a status refinement
+(`pending` → `in_progress` → `completed`) and announces nothing new. How many
+refinements arrive varies per tool and per run, so anything counting both is
+measuring adapter chatter, not work.
+
+This is the only signal Hermes has for how much the sub-agent actually did:
+in native mode `tool_calls` is forced empty, so none of it surfaces as an
+OpenAI tool call. `_last_turn_tool_calls` tallies it (reset per
+`session/prompt`, alongside `_last_turn_usage`) and
+`_credit_native_tool_iterations()` spends it on the skill-review nudge — see
+"Counters the loop owns" in `surfaces.md`.
+
 ## Approval routing
 
 `session/request_permission` splits two ways in `_handle_server_message`
 (`:2342`):
 
 - **Shell** — when `shell_command` is non-empty *and* (`toolName == "Bash"` or
-  `kind == "execute"`). Goes to `check_dangerous_command(cmd, env_type="local")`:
+  `kind == "execute"`). Goes to `check_all_command_guards(cmd, env_type="local")`:
   safe reads auto-approve, the hardline floor still applies.
-- **Everything else** — `_run_approval_gate(pattern_key=f"copilot-acp:{tool}:{sha256(target)[:12]}",
+- **Everything else** — `smart_tool_verdict(...)` first (returns `None` unless
+  `approvals.mode` is `smart`), then
+  `_run_approval_gate(pattern_key=f"copilot-acp:{tool}:{sha256(target)[:12]}",
   fail_closed_when_no_human=True)`. Per-target grain, so `[a]lways` on one path
   does not bless another; only the target string is hashed, so content churn
   keeps the key stable.
+
+**The shell branch called `check_dangerous_command` until 2026-08-21.** That is
+the narrower of `approval.py`'s two public shell entry points, and its caller set
+had drifted to Hermes' own `terminal` tool alone. Four guards live only in the
+`check_all_command_guards` wrapper — tirith content scanning, the sudo-stdin
+guard, `approvals.mode: off`, and the smart-approval aux-LLM pass — so an ACP
+`Bash` call was held to a weaker standard than the identical command typed at
+`terminal`, and an operator who set `approvals.mode` was ignored on this path
+entirely. Both functions return the same result dict, so the swap is caller-local.
+
+Smart approval for **non-shell** tools has no such wrapper to inherit from:
+Phase 2.5 lives inside `check_all_command_guards`, which takes a command string
+and cannot be handed a tool call. `smart_tool_verdict` (`tools/approval.py`) is
+the tool-shaped entry point, wrapping a guardian (`_smart_approve_tool`) with its
+own prompt keyed on the tool+target pair. It is deliberately **not** a reuse of
+`_smart_approve`, whose prompt is entirely shell semantics ("recursive delete",
+"fork bombs"); a file path judged against that grammar degrades to surface-token
+matching.
+
+Two contracts worth holding onto:
+
+- **`None` and `"escalate"` are different answers.** `None` means the guardian
+  never ran — mode is not `smart`, or no human was present to spare — and the
+  caller must fall through to its normal gate. A guardian that *errors* returns
+  `escalate`, never `None`, so a dead aux model degrades to asking rather than
+  to silently skipping the check.
+- **The guardian only runs when a human could otherwise have been prompted.**
+  The shell path enforces this structurally, by placing Phase 2.5 after
+  `check_all_command_guards` has already returned on the non-interactive branch;
+  `smart_tool_verdict` mirrors it explicitly. The ACP tool gate passes
+  `fail_closed_when_no_human=True`, so letting the guardian answer in a headless
+  cron or gateway session would quietly convert a hard denial into "an LLM
+  decides". Unattended policy stays where the operator set it:
+  `approvals.cron_mode` / `single_query_mode`. Single-query (`-q`) exports
+  `HERMES_INTERACTIVE=1` but has nobody to answer, so it is demoted first.
+
+A smart `approve` is applied to **that call only** and is never persisted under
+the pattern key — one benign write to a scratch file must not bless every later
+call that hashes to the same tool. A smart `deny` is hard: unlike the shell path
+there is no interactive-owner override, because the ACP handler answers a
+protocol request with a single allow/deny outcome and has no channel to raise a
+one-shot override card mid-request.
 
 `_acp_shell_command()` (`:381`) reads only `command`/`cmd` — deliberately
 narrower than `_raw_input_detail()` (`:194`), which also returns paths and

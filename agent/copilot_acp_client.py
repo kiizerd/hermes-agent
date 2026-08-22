@@ -1564,6 +1564,12 @@ class CopilotACPClient:
         # completion builders after the turn settles; None when the agent
         # reported nothing.
         self._last_turn_usage: dict[str, Any] | None = None
+        # Count of distinct `tool_call` notifications the sub-agent announced
+        # during the most recent session/prompt. Reset per turn alongside
+        # _last_turn_usage. Only meaningful in native tool mode, where these
+        # are tools Hermes never sees as OpenAI tool_calls -- see
+        # _credit_native_tool_iterations for what it is for.
+        self._last_turn_tool_calls: int = 0
         # toolCallId -> _meta.claudeCode.toolName, harvested from the streamed
         # tool_call notifications so a permission request that omits toolName
         # can still be keyed per tool. Touched only from the stdout reader
@@ -2628,6 +2634,7 @@ class CopilotACPClient:
         # and the slot indices are meaningless against a different list.
         tool_lines: dict[str, dict[str, Any]] = {}
         self._last_turn_usage = None
+        self._last_turn_tool_calls = 0
         result = self._rpc(
             "session/prompt",
             {
@@ -2663,7 +2670,73 @@ class CopilotACPClient:
             goal = _acp_goal_snapshot(response_meta)
             if goal is not None:
                 self._surface_goal(goal, emit)
+        self._credit_native_tool_iterations()
         return "".join(text_parts), "".join(reasoning_parts)
+
+    def _credit_native_tool_iterations(self) -> None:
+        """Tell Hermes how much tool work the sub-agent actually did this turn.
+
+        Hermes' skill-review nudge fires once ``_iters_since_skill`` reaches
+        ``skills.creation_nudge_interval`` (default 10), and that counter is
+        bumped once per pass through the chat-completions loop
+        (``agent/conversation_loop.py``). On every ordinary provider one turn
+        makes many passes -- one per tool batch -- so the threshold is reached
+        in a handful of turns.
+
+        Native ACP breaks that assumption. ``tool_calls`` is forced empty for
+        this mode (see ``_create_chat_completion``), so the loop exits after a
+        single pass no matter how much work the sub-agent did behind the wire:
+        a turn where Claude ran twenty tools tick the counter exactly once,
+        the same as a turn where it answered from memory. The nudge therefore
+        needs ~10 user turns instead of ~10 tool iterations, and in practice
+        the skill review effectively stopped firing on this provider while
+        memory review (which is turn-counted, not iteration-counted) kept
+        working -- the asymmetry that made the bug hard to see.
+
+        The sub-agent's real tool count DOES cross the wire, as one
+        ``tool_call`` notification per call, so credit the difference here.
+        ``- 1`` because the loop already counts this turn once; without it
+        every turn would be double-counted.
+
+        Same compensation ``agent/codex_runtime.py`` applies for the codex
+        app-server path (``_iters_since_skill += turn.tool_iterations``),
+        which bypasses the loop for the same underlying reason.
+
+        Best-effort and silent: this is a heuristic for when to *offer* a
+        skill review, never a correctness path.
+        """
+        extra = self._last_turn_tool_calls - 1
+        if extra <= 0:
+            return
+        if _resolve_tool_mode(self._acp_command, self._acp_args) != "native":
+            # Bridge mode runs tools through Hermes' own loop, which counts
+            # them correctly on its own. Crediting here would double-count.
+            return
+        agent = self._agent()
+        if agent is None:
+            return
+        try:
+            # Mirror BOTH conditions the loop puts on its own `+= 1`
+            # (agent/conversation_loop.py) -- not just the interval. The `- 1`
+            # above is only correct when the loop actually counted this turn,
+            # and the loop skips agents that cannot call skill_manage at all
+            # (a leaf sub-agent with restricted toolsets, for one). Crediting
+            # those would inflate a counter by N instead of N-1 and stack it
+            # on an agent that can never act on the nudge.
+            #
+            # A zero interval means the nudge is disabled for this agent --
+            # notably the background-review fork, which sets it to 0 so it
+            # cannot recursively spawn another review. Respect that rather
+            # than accumulating a tally nothing will ever read.
+            if getattr(agent, "_skill_nudge_interval", 0) <= 0:
+                return
+            if "skill_manage" not in getattr(agent, "valid_tool_names", ()):
+                return
+            agent._iters_since_skill = (
+                getattr(agent, "_iters_since_skill", 0) + extra
+            )
+        except Exception:
+            logger.debug("skill-iteration credit failed", exc_info=True)
 
     def _run_prompt(
         self,
@@ -3006,6 +3079,12 @@ class CopilotACPClient:
                 # Outside the display branch below on purpose: the approval
                 # gate needs this even on paths that stream nothing.
                 self._remember_tool_name(update)
+            if kind == "tool_call":
+                # `tool_call` announces ONE new call; `tool_call_update` only
+                # refines an existing one, so counting both would inflate the
+                # tally several times over per tool. See
+                # _credit_native_tool_iterations.
+                self._last_turn_tool_calls += 1
             if kind == "agent_message_chunk" and chunk_text and text_parts is not None:
                 text_parts.append(chunk_text)
                 if emit is not None:
@@ -3105,9 +3184,10 @@ class CopilotACPClient:
                 # pattern key hashed the full command string so answering
                 # [a]lways never matched the next, slightly different call.
                 from tools.approval import (
+                    check_all_command_guards,
                     check_command_floors,
-                    check_dangerous_command,
                     is_tool_allowlisted,
+                    smart_tool_verdict,
                     _run_approval_gate,
                 )
 
@@ -3160,7 +3240,20 @@ class CopilotACPClient:
                         # applies, including the unconditional hardline floor
                         # for commands with no recovery path. Safe reads
                         # auto-approve, so routine calls stop prompting.
-                        result = check_dangerous_command(
+                        #
+                        # check_all_command_guards, NOT check_dangerous_command:
+                        # the latter is the narrower of the two public shell
+                        # entry points and its caller set had drifted to
+                        # Hermes' own terminal tool alone. Four guards live
+                        # only in the wrapper -- tirith content scanning, the
+                        # sudo-stdin guard, `approvals.mode: off`, and the
+                        # smart-approval aux-LLM pass -- so an ACP Bash call
+                        # was held to a weaker standard than the identical
+                        # command run through `terminal`, and a user who set
+                        # approvals.mode was ignored on this path entirely.
+                        # Both functions return the same result dict, so the
+                        # branch below is unchanged.
+                        result = check_all_command_guards(
                             shell_command,
                             env_type="local",
                         )
@@ -3208,29 +3301,79 @@ class CopilotACPClient:
                         target_hash = hashlib.sha256(
                             command.encode("utf-8")
                         ).hexdigest()[:12]
-                        result = _run_approval_gate(
-                            pattern_key=f"copilot-acp:{gate_name}:{target_hash}",
-                            description=description,
-                            display_target=command,
-                            cron_deny_message=(
-                                f"BLOCKED: Copilot tool call flagged for "
-                                f"approval ({description}) but cron jobs run "
-                                "without a user present to approve it."
-                            ),
-                            single_query_deny_message=(
-                                f"BLOCKED: Copilot tool call flagged for "
-                                f"approval ({description}) but single-query "
-                                "mode (-q) runs without a user present to "
-                                "approve it."
-                            ),
-                            autoapprove_log_prefix="Copilot ACP tool call",
-                            fail_closed_when_no_human=True,
-                            no_human_block_message=(
-                                f"BLOCKED: Copilot requested approval "
-                                f"({description}) but no interactive user or "
-                                "gateway is present to answer it."
-                            ),
+                        tool_pattern_key = (
+                            f"copilot-acp:{gate_name}:{target_hash}"
                         )
+                        # Smart approval for NON-shell tools. The shell branch
+                        # above gets this for free inside
+                        # check_all_command_guards; there is no equivalent
+                        # wrapper for a tool call, so the aux-LLM pass is
+                        # invoked explicitly here. Returns None whenever
+                        # approvals.mode is not "smart", which leaves the
+                        # manual gate below exactly as it was.
+                        smart = smart_tool_verdict(
+                            gate_name,
+                            command,
+                            description,
+                            pattern_key=tool_pattern_key,
+                        )
+                        if smart == "approve":
+                            # Approve THIS call only -- deliberately not
+                            # persisted under the pattern key. One benign
+                            # write to a scratch file must not silently bless
+                            # every later call that hashes to the same tool.
+                            logger.info(
+                                "Copilot ACP tool auto-approved by smart "
+                                "approval: %s", description,
+                            )
+                            result = {"approved": True, "message": None,
+                                      "smart_approved": True}
+                        elif smart == "deny":
+                            # Hard deny. Unlike the shell path there is no
+                            # interactive-owner override here: the ACP handler
+                            # answers a protocol request with a single
+                            # allow/deny outcome and has no channel to offer
+                            # the user a one-shot override card mid-request.
+                            logger.warning(
+                                "Copilot ACP tool DENIED by smart approval: "
+                                "%s", description,
+                            )
+                            result = {
+                                "approved": False,
+                                "message": (
+                                    f"BLOCKED by smart approval: "
+                                    f"{description}. Assessed as genuinely "
+                                    "dangerous. Do NOT retry."
+                                ),
+                                "smart_denied": True,
+                            }
+                        else:
+                            # None (mode is not smart) or "escalate" both mean
+                            # the human decides, which is the pre-existing
+                            # behaviour.
+                            result = _run_approval_gate(
+                                pattern_key=tool_pattern_key,
+                                description=description,
+                                display_target=command,
+                                cron_deny_message=(
+                                    f"BLOCKED: Copilot tool call flagged for "
+                                    f"approval ({description}) but cron jobs "
+                                    "run without a user present to approve it."
+                                ),
+                                single_query_deny_message=(
+                                    f"BLOCKED: Copilot tool call flagged for "
+                                    f"approval ({description}) but "
+                                    "single-query mode (-q) runs without a "
+                                    "user present to approve it."
+                                ),
+                                autoapprove_log_prefix="Copilot ACP tool call",
+                                fail_closed_when_no_human=True,
+                                no_human_block_message=(
+                                    f"BLOCKED: Copilot requested approval "
+                                    f"({description}) but no interactive user "
+                                    "or gateway is present to answer it."
+                                ),
+                            )
                 option_id = (
                     _select_permission_option(options)
                     if result.get("approved")

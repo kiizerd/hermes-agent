@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **73 files, +10,286 / −283**.
+against the merge base: **80 files, +12,680 / −311**.
 
 Last verified against `upstream/main` at `00c12dac613` (2026-08-16). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -485,6 +485,72 @@ display string is not a cache identity.
 Current state: `--against upstream/main` is clean across 1,511 first-party call
 sites in 22 fork files, so the 12 unpulled upstream commits break no call site.
 
+### `51158f78f` — route native ACP approvals through the full guard stack
+
+7 files, +936 / −32. Two unrelated gaps that share a root: native mode routes
+around the machinery Hermes normally runs, and both times the bypass was silent.
+
+**The shell branch called the wrong guard.** `session/request_permission` went to
+`check_dangerous_command`, the narrower of `approval.py`'s two public shell entry
+points, whose caller set had drifted to Hermes' own `terminal` tool alone. Four
+guards live only in the `check_all_command_guards` wrapper — tirith content
+scanning, the sudo-stdin guard, `approvals.mode: off`, and the smart-approval
+aux-LLM pass. An ACP `Bash` call was therefore held to a weaker standard than the
+identical command typed at `terminal`, and an operator who set `approvals.mode`
+was ignored on this path entirely. Both functions return the same result dict, so
+the swap is caller-local — one line, no branch change below it.
+
+**Non-shell tools had no wrapper to inherit from.** Phase 2.5 lives *inside*
+`check_all_command_guards`, which takes a command string and cannot be handed a
+tool call. `smart_tool_verdict` is the tool-shaped entry point, wrapping a
+guardian (`_smart_approve_tool`) with its own prompt keyed on the tool+target
+pair. Deliberately not a reuse of `_smart_approve`, whose prompt is entirely
+shell semantics ("recursive delete", "fork bombs") — a file path judged against
+that grammar has no grammar to reason with and degrades to surface-token
+matching.
+
+Three contracts hold that gate together:
+
+- **`None` and `escalate` are different answers.** `None` means the guardian
+  never ran and the caller must fall through to its normal gate. A guardian that
+  *errors* returns `escalate`, never `None`, so a dead aux model degrades to
+  asking rather than to silently skipping the check.
+- **It only runs when a human could otherwise have been prompted.** The shell
+  path enforces this structurally, by placing Phase 2.5 after the
+  non-interactive branch has already returned; the tool path mirrors it
+  explicitly. The ACP gate passes `fail_closed_when_no_human=True`, so answering
+  in a headless cron or gateway session would quietly convert a hard denial into
+  "an LLM decides". Unattended policy stays where the operator set it.
+  Single-query (`-q`) exports `HERMES_INTERACTIVE=1` but has nobody to answer, so
+  it is demoted first.
+- **A smart approve is not persisted.** It applies to that call only, never under
+  the pattern key — one benign write to a scratch file must not bless every later
+  call hashing to the same tool.
+
+**Native tool work now reaches the skill nudge.** `tool_calls` is forced empty
+for the mode, so the conversation loop exits after a single pass however much the
+sub-agent did behind the wire: a turn where Claude ran twenty tools ticked
+`_iters_since_skill` exactly once, so the nudge needed ~10 *user turns* instead
+of ~10 tool iterations. Memory review is turn-counted rather than
+iteration-counted and kept working throughout — that asymmetry is why this read
+as "ACP never updates skills" rather than as a counter problem. Tally the
+`tool_call` notifications and supply the difference, the same compensation
+`codex_runtime.py:876` applies for the codex app-server path.
+
+The credit copies **both** conditions the loop puts on its own increment, not
+just the interval. An agent without `skill_manage` in `valid_tool_names` is never
+counted by the loop, so crediting it would under-count by one *and* stack a tally
+onto an agent that can never act on the nudge. Codex needs no such guard at its
+credit site because it bypasses the loop entirely and applies the test at the
+nudge check instead — same invariant, two correct placements, and copying codex
+verbatim here would have been wrong.
+
+Verified against a pristine worktree rather than assumed: the naked-batch gate
+set is 494 passed / 4 failed, and all four reproduce identically on untouched
+HEAD (`test_ping_suppression` asyncio teardown, three `symlink_to` calls needing
+a Windows privilege this box does not hold). Both are now recorded in
+`verification.md` so the next run does not chase them.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -493,7 +559,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 
 | File | Δ | Role |
 |---|---|---|
-| `agent/copilot_acp_client.py` | +2306 / −157 | The fork. Native tool mode, sessions, streaming, permission gate, thinking, modes, MCP wiring, project cwd |
+| `agent/copilot_acp_client.py` | +2794 / −155 | The fork. Native tool mode, sessions, streaming, permission gate, thinking, modes, MCP wiring, project cwd, native tool-iteration credit |
 | `agent/transports/hermes_tools_mcp_server.py` | +126 / −11 | `memory`, `session_search`, `skill_manage` added to the exposed tool surface |
 | `agent/auxiliary_client.py` | +15 / −3 | Advisory (tool-less) client for `moa_reference`; task-keyed client cache |
 | `agent/model_metadata.py` | +23 | Import + step 5a0 branch delegating to `agent/acp_alias_context.py` |
@@ -503,7 +569,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `agent/display.py` | +13 / −1 | `build_tool_preview` fallback keys |
 | `agent/turn_context.py` | +12 | MemoryStore staleness reload |
 | `tools/memory_tool.py` | +71 | Cross-process MemoryStore sync |
-| `tools/approval.py` | +48 | `approvals.tool_allowlist` for non-shell tools |
+| `tools/approval.py` | +259 / −18 | `approvals.tool_allowlist` for non-shell tools; `smart_tool_verdict` + `_smart_approve_tool`, the tool-shaped entry to smart approval |
 
 ### Python — CLI, config, gateway
 
@@ -541,7 +607,8 @@ Where the fork touches upstream code, and what to check after a rebase.
 | File | Δ |
 |---|---|
 | `tests/scripts/test_fork_signature_drift.py` | +622 (fork-only; synthetic fixtures, plus a live guard over the real fork) |
-| `tests/agent/test_copilot_acp_approval_routing.py` | +530 |
+| `tests/agent/test_copilot_acp_approval_routing.py` | +895 |
+| `tests/agent/test_copilot_acp_skill_iterations.py` | +245 (fork-only; native tool-iteration credit) |
 | `tests/agent/test_copilot_acp_client.py` | +353 / −1 |
 | `tests/agent/test_copilot_acp_system_prompt_mode.py` | +303 (bridge/native wire shape, exclusions, lock) |
 | `tests/agent/transports/test_hermes_tools_mcp_server.py` | +258 |

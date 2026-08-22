@@ -19,6 +19,8 @@ the dashboard form work with no extra wiring.
 | `copilot_acp.disallowed_tools` | list | `[]` | Deny list; concatenated with the agent's own |
 | `copilot_acp.additional_directories` | list | `[]` | Extra readable dirs (the `--add-dir` equivalent) |
 | `approvals.tool_allowlist` | list | — | Globs matching non-shell tool keys that auto-approve. Grant-only — cannot deny |
+| `approvals.mode` | str | `manual` | Upstream key. `smart` now reaches **both** ACP branches — see "Approval routing" in `wire-contracts.md`. Was silently inert on this provider until then |
+| `approvals.smart_policy` | str | `""` | Upstream key. Operator rules injected on the SYSTEM channel of both guardians, shell and tool |
 | `mcp_servers.<name>` | map | — | Upstream key. The fork now **forwards these to the ACP agent** (see below) |
 
 Read on the Python side by `_acp_config` / `_acp_config_str` / `_acp_config_list`
@@ -186,6 +188,38 @@ of the app are allowed to call:
 Resolution ladder, `_effective_acp_mode()` (`:1301`) then `_requested_acp_mode()`
 (`:673`): **session override → `HERMES_ACP_PERMISSION_MODE` → config → `""`**.
 `source` reports which rung won.
+
+### Counters the loop owns, and what native mode does to them
+
+Hermes offers a background skill review once `_iters_since_skill` reaches
+`skills.creation_nudge_interval` (**default 10**, `agent/agent_init.py:1918`).
+`agent/conversation_loop.py` bumps that counter once per pass through the
+chat-completions loop, and on an ordinary provider one user turn makes many
+passes — one per tool batch — so the threshold arrives in a handful of turns.
+
+Native ACP breaks the assumption the counter is built on. `tool_calls` is forced
+empty for the mode, so the loop exits after a single pass however much work the
+sub-agent did behind the wire: a turn where Claude ran twenty tools ticked it
+exactly once, the same as a turn answered from memory. The nudge therefore
+needed ~10 *user turns* instead of ~10 tool iterations. Memory review is
+turn-counted rather than iteration-counted, so it kept working the whole time —
+that asymmetry is what made the bug hard to see, and why it read as "ACP never
+updates skills" rather than as a counter problem.
+
+`_credit_native_tool_iterations()` supplies the difference from
+`_last_turn_tool_calls`, the same compensation `agent/codex_runtime.py:876`
+applies for the codex app-server path. Three guards, each load-bearing:
+
+| Guard | Why |
+|---|---|
+| `- 1` on the tally | The loop already counted this turn once |
+| tool mode is `native` | Bridge runs tools through Hermes' own loop, which counts them correctly; crediting would double-count |
+| `_skill_nudge_interval > 0` **and** `skill_manage in valid_tool_names` | Both conditions the loop puts on its own `+= 1`. Copy **both** or the arithmetic stops being exact — a leaf sub-agent with restricted toolsets fails the second, so the loop counts 0 and the `- 1` under-credits by one while stacking a tally onto an agent that can never act on the nudge |
+
+Codex needs no `valid_tool_names` guard at its credit site because it bypasses
+the loop entirely and applies that test at the *nudge check*
+(`codex_runtime.py:889`) instead. Same invariant, two correct placements —
+copying codex verbatim here would be wrong.
 
 ## Gateway RPC
 

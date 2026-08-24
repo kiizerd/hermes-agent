@@ -551,6 +551,58 @@ HEAD (`test_ping_suppression` asyncio teardown, three `symlink_to` calls needing
 a Windows privilege this box does not hold). Both are now recorded in
 `verification.md` so the next run does not chase them.
 
+### `<pending>` — make the heavy CI lanes resolve on a fork
+
+6 files, +15 / −15 (one `runs-on` and one `timeout-minutes` per lane, plus the
+Python worker count).
+
+Upstream `10f99bc15e` (2026-08-22) moved every heavy lane onto **GitHub larger
+runners**. Those labels are provisioned per-org: `NousResearch` has them, a
+personal fork does not. GitHub does not fall back to a standard runner — an
+unresolvable label queues until the 24h ceiling, so every lane read as a hang,
+not an error:
+
+```
+The job has exceeded the maximum execution time while awaiting a runner for 24h0m0s
+```
+
+The fix keeps upstream's label and adds the fork's, selected by repository:
+
+```yaml
+runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-96-core' || 'ubuntu-latest' }}
+```
+
+| File | Lane | Upstream runner | Fork runner |
+|---|---|---|---|
+| `tests.yml:24` | Python tests | `ubuntu-latest-96-core` | `ubuntu-latest` |
+| `js-tests.yml:17` | JS & TS checks | `ubuntu-latest-32-core` | `ubuntu-latest` |
+| `rust-tests.yml:33` | Rust tests | `ubuntu-latest-32-core` | `ubuntu-latest` |
+| `tests-os.yml:52` | Windows-only tests | `windows-latest-32-core` | `windows-latest` |
+| `nix.yml:57` | nix flake check | `ubuntu-latest-32-core` | `ubuntu-latest` |
+| `e2e-desktop.yml:23` | Desktop E2E | `ubuntu-latest-32-core` | `ubuntu-latest` |
+
+Two values move with the label, both in `tests.yml`. Neither is cosmetic:
+
+- **`HERMES_TEST_WORKERS` (`:122`), 96 → 4.** Upstream's comment block measures
+  one worker per core as the win. 96 subprocesses on a 4-core / 16 GB runner is
+  not a slower version of that — it is an OOM.
+- **`timeout-minutes` (`:25`), 30 → 90.** Upstream measured 11,645s of test
+  work in series. 96 cores land it inside 30 minutes; 4 cores do not.
+
+Other lanes get a timeout raise on the same reasoning: js/rust/os 30 → 60, nix
+60 → 120, desktop E2E 20 → 45.
+
+`docker.yml` needs no edit. Its three jobs are already gated
+`if: github.repository == 'NousResearch/hermes-agent'` (`:73`, `:185`, `:266`),
+so its four `-32-core` / `-32-arm-core` labels are never requested here.
+
+**Rebase note.** These are one-line edits inside files upstream actively
+maintains, so each is a standing conflict. The ternary form is deliberate: it
+preserves upstream's value verbatim on the left, which makes the resolution
+"keep the fork's line" obvious in a conflict hunk instead of looking like the
+fork deleted upstream's runner. It is also upstreamable as-is — it fixes CI for
+every fork, not just this one. If upstream takes it, this entry retires.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -621,6 +673,17 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `tests/agent/test_empty_tool_name_loop_dampening.py` | +17 / −2 (restores `sys.modules` — upstream bug, see verification) |
 | `tests/hermes_cli/test_{api_key_providers,model_validation}.py` | +1 / −1 each (label) |
 | Desktop `*.test.tsx` / `*.test.ts` | +570 across 7 files |
+
+### CI (one line each — upstream owns these files)
+
+| File | Δ | Role |
+|---|---|---|
+| `.github/workflows/tests.yml` | +3 / −3 | Runner, timeout, `HERMES_TEST_WORKERS` |
+| `.github/workflows/js-tests.yml` | +2 / −2 | Runner, timeout |
+| `.github/workflows/rust-tests.yml` | +2 / −2 | Runner, timeout |
+| `.github/workflows/tests-os.yml` | +2 / −2 | Windows matrix runner, timeout |
+| `.github/workflows/nix.yml` | +2 / −2 | Runner, timeout |
+| `.github/workflows/e2e-desktop.yml` | +2 / −2 | Runner, timeout |
 
 ### Fork-only files (additive — no rebase risk)
 

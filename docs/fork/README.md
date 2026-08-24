@@ -70,6 +70,23 @@ a design choice.
 6. **Every positive test needs a negative control.** A probe that only runs the
    arm you expect to pass proves nothing about the arm you disabled.
 
+## Fork repo settings (divergence that is NOT in the tree)
+
+GitHub repo-side state that differs from upstream. None of it is a file, so
+none of it shows in a diff or survives a `gh repo` re-clone — it has to be
+re-applied by hand on a fresh fork.
+
+| Setting | Value | Why |
+|---|---|---|
+| Workflow `auto-fix lint issues & formatting` (`js-autofix.yml`) | `disabled_manually` | The privileged `apply-patch` job needs a GitHub App (`vars.APP_CLIENT_ID` / `secrets.APP_PRIVATE_KEY`). The fork has neither, so it falls back to `GITHUB_TOKEN`, which GitHub blocks from opening PRs: `GitHub Actions is not permitted to create or approve pull requests`. The job produced a real patch, pushed `bot/js-autofix`, then died every push. Replacement: run `npm run fix` locally before pushing. |
+
+Re-enable with `gh workflow enable "<name>" --repo kiizerd/hermes-agent`;
+audit with `gh workflow list --all --repo kiizerd/hermes-agent`.
+
+Disabling a workflow repo-side rather than editing its YAML is deliberate:
+upstream owns those files and edits there become a permanent rebase conflict.
+Keep it that way, and keep this table current instead.
+
 ## Keeping this alive
 
 When you land a change on the fork:

@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **80 files, +12,680 / −311**.
+against the merge base: **86 files, +12,773 / −324**.
 
 Last verified against `upstream/main` at `00c12dac613` (2026-08-16). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -551,7 +551,7 @@ HEAD (`test_ping_suppression` asyncio teardown, three `symlink_to` calls needing
 a Windows privilege this box does not hold). Both are now recorded in
 `verification.md` so the next run does not chase them.
 
-### `<pending>` — make the heavy CI lanes resolve on a fork
+### `9ec26c7632` — make the heavy CI lanes resolve on a fork
 
 6 files, +15 / −15 (one `runs-on` and one `timeout-minutes` per lane, plus the
 Python worker count).

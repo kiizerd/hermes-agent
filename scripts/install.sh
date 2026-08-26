@@ -2423,9 +2423,18 @@ install_node_deps() {
         # installed", hiding the degradation from the user (#77003). Now it
         # fails the install outright instead of burying the warning (#85297).
         # Capture npm output so failures are diagnosable (#87340).
+        # --maxsockets caps how many TCP connections npm opens at once. On the
+        # re-run E2E route the checkout jumps ~17k commits, so the dependency
+        # tree is huge and npm would otherwise burst 40+ simultaneous TLS
+        # connections through the sandbox proxy, which the proxy's per-CONNECT
+        # handshake cannot absorb — every connection resets at once
+        # (SSLEOFError storm) and the install dies silently. Throttling npm's
+        # own concurrency matches a real (throttled) network and removes the
+        # burst. A real registry also rate-limits concurrency, so this is
+        # faithful, not a workaround.
         local npm_log
         npm_log="$(mktemp)"
-        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent \
+        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent --maxsockets 8 \
                 >"$npm_log" 2>&1; then
             log_error "npm install failed or timed out; Node.js dependencies were not installed"
             if [ -s "$npm_log" ]; then
@@ -2539,9 +2548,12 @@ install_node_deps() {
         # Report success only on actual success, same as node-deps above
         # (#77003) — and fail the install outright (#85297).
         # Capture npm output so failures are diagnosable (#87340).
+        # --maxsockets caps npm's concurrent TLS connections; see the
+        # browser-tools block above for why (throttles the burst that the
+        # sandbox proxy's per-CONNECT handshake cannot absorb).
         local tui_npm_log
         tui_npm_log="$(mktemp)"
-        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent \
+        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent --maxsockets 8 \
                 >"$tui_npm_log" 2>&1; then
             log_error "TUI npm install failed or timed out; TUI dependencies were not installed"
             if [ -s "$tui_npm_log" ]; then

@@ -30,7 +30,7 @@ ROOT, CERTS, REAL_CA = map(pathlib.Path, sys.argv[1:])
 
 LISTEN_ADDRESS = ('127.0.0.1', 8080)
 MAX_REQUEST_BYTES = 65536
-UPSTREAM_TIMEOUT_SECONDS = 30
+UPSTREAM_TIMEOUT_SECONDS = 60
 CERT_VALIDITY_DAYS = 2
 
 # Bounded upstream concurrency. npm install against a large dependency tree
@@ -42,6 +42,16 @@ CERT_VALIDITY_DAYS = 2
 # while preventing the burst from killing the run.
 MAX_UPSTREAM_CONNECTIONS = 8
 UPSTREAM_SEMAPHORE = threading.Semaphore(MAX_UPSTREAM_CONNECTIONS)
+
+# Bounds concurrent TLS-termination handshakes on the inbound side. npm install
+# on a large dependency tree opens dozens of CONNECTs at once; without a cap the
+# proxy forks a thread per tunnel and races to mint a cert + wrap_socket for all
+# of them, and the upstream handshake storm resets them (SSLEOFError). This caps
+# how many tunnels are being terminated at once — but it is RELEASED before the
+# (slow) upstream fetch, unlike UPSTREAM_SEMAPHORE, so accepting new connections
+# never blocks behind in-flight fetches.
+MAX_INBOUND_HANDSHAKES = 16
+INBOUND_SEMAPHORE = threading.Semaphore(MAX_INBOUND_HANDSHAKES)
 
 # Upstream TLS handshakes (and the connections behind them) occasionally reset
 # mid-flight under concurrency. A single transient reset must not fail the
@@ -218,15 +228,12 @@ def handle_connect(conn, target):
     host, _, port_text = target.rpartition(':')
     port = int(port_text or '443')
     conn.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
-    # Terminate a bounded number of tunnels concurrently. npm install on a
-    # large dependency tree opens dozens of CONNECTs at once; without a cap
-    # the proxy tries to mint a cert + wrap_socket for every one in parallel,
-    # and the upstream handshake storm resets them all at once
-    # (SSLEOFError), which aborts the install. Serializing the inbound
-    # terminate step behind the same semaphore as the outbound connect keeps
-    # the proxy's in-flight TLS count finite and matches a real (throttled)
-    # network.
-    with UPSTREAM_SEMAPHORE:
+    # Bound concurrent inbound TLS terminations so the proxy doesn't fork a
+    # thread per tunnel and race the cert-mint + wrap_socket for dozens of
+    # CONNECTs at once (which resets them — SSLEOFError). The semaphore is
+    # released as soon as the tunnel is established, BEFORE the (slow) upstream
+    # fetch, so accepting new connections never stalls behind in-flight fetches.
+    with INBOUND_SEMAPHORE:
         cert, key = cert_for(host)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)

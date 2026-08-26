@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **91 files, +13,617 / −325**.
+against the merge base: **92 files, +14,195 / −365**.
 
 Last verified against `upstream/main` at `f0187332d13` (2026-08-26). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -716,6 +716,69 @@ A gate that cries wolf gets ignored.
 ref is broken, not that a ref still points at the right function. Advancing the
 `Last verified` line above still means reading them.
 
+### `a53eb4e2c1` — bridge the active memory provider's tools into native sessions
+
+3 files, +533 / −47. Closes the `todo.md` entry opened the same day.
+
+A memory provider declares its tools on the `MemoryProvider` ABC
+(`agent/memory_provider.py:232`) and the live agent routes them through a
+`MemoryManager` built at init (`agent/agent_init.py:1904`). None of that touches
+`tools/registry.py`, so the tools never enter `get_tool_definitions()` —
+measured on this box: 44 definitions, zero `hindsight_*`.
+
+That also corrects the fix sketched in the todo entry. Folding provider tool
+*names* into `EXPOSED_TOOLS` could not have worked: the registration loop looks
+each name up in the `get_tool_definitions()` dict and `continue`s on a miss, so
+the names would have been silently skipped. The bridge has to supply the schemas
+too, not just the names.
+
+What hid it is the asymmetry between a provider's automatic and explicit halves.
+`prefetch()` (`plugins/memory/hindsight/__init__.py:1935`) and `sync_turn()`
+(`:2080`) run server-side in the parent Hermes process, so recall arrives
+pre-injected and every turn is still ingested. Only the explicit tools were
+missing — and only for native ACP/codex sessions, which are precisely the
+sessions whose system-prompt block says *"use hindsight_recall to search,
+hindsight_retain to store facts"*. Live instruction, absent tools.
+
+`_memory_provider_bridge()` rebuilds the same two pieces `agent_init` builds —
+`load_memory_provider()` plus a `MemoryManager` — rather than calling the
+provider directly, so the reserved core-tool-name rule and the schema
+normalisation in `MemoryManager.add_provider()` apply identically.
+
+Three things the implementation cannot skip:
+
+- **`initialize()` is mandatory.** Provider tool handlers read state only it
+  assigns — hindsight resolves its `bank_id` template there
+  (`plugins/memory/hindsight/__init__.py:1673`) and sets `_observation_scopes`
+  (`:1701`) and `_recall_tags` (`:1705`). An uninitialised provider looks wired
+  and raises `AttributeError` on the first retain.
+- **Identity has to match the parent.** `HERMES_SESSION_ID` / `HERMES_HOME` /
+  `HERMES_PROFILE` already crossed into the subprocess, so session tags and the
+  profile `agent_identity` derives from resolve to the parent's values.
+  `HERMES_PLATFORM` is added to that forward list because `bank_id_template` can
+  interpolate `{platform}` — a mismatch would write to a *different bank*.
+  Absent, the bridge takes `agent_init`'s own `"cli"` default.
+- **Order matters.** Provider tools register after the curated list because
+  `MCPServer.add_tool` accepts a duplicate name silently, last writer wins
+  (probed directly). An unguarded collision would *replace* the Hermes tool
+  rather than raise. `MemoryManager.add_provider()` already rejects provider
+  tools named after a `_HERMES_CORE_TOOLS` entry, and every current
+  `EXPOSED_TOOLS` name is one, so today that layer catches it first; the
+  bridge's own check covers what it cannot — an exposed tool that is not a core
+  tool.
+
+Fails soft: no provider configured, provider unavailable, or load raising all
+yield `(None, [])` and the rest of the surface still comes up. Shutdown drains
+the provider so retains queued on its daemon writer thread get a chance to land.
+
+Verified live against the configured hindsight provider — 3 tools on a real
+`MCPServer`, `hindsight_recall` returning stored facts, `hindsight_retain`
+storing, an unknown tool routed to a clean error. Disabling the bridge takes the
+server 13 → 10 tools, exactly the 3. All four guards in
+`tests/agent/transports/test_memory_provider_mcp_bridge.py` are mutation-checked:
+dropping the registration block, skipping `initialize()`, removing the shadow
+guard, and dropping the shutdown drain each turn the suite red.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -724,8 +787,8 @@ Where the fork touches upstream code, and what to check after a rebase.
 
 | File | Δ | Role |
 |---|---|---|
-| `agent/copilot_acp_client.py` | +2794 / −155 | The fork. Native tool mode, sessions, streaming, permission gate, thinking, modes, MCP wiring, project cwd, native tool-iteration credit |
-| `agent/transports/hermes_tools_mcp_server.py` | +126 / −11 | `memory`, `session_search`, `skill_manage` added to the exposed tool surface |
+| `agent/copilot_acp_client.py` | +2808 / −155 | The fork. Native tool mode, sessions, streaming, permission gate, thinking, modes, MCP wiring (incl. `HERMES_PLATFORM` forward for memory-bank identity), project cwd, native tool-iteration credit |
+| `agent/transports/hermes_tools_mcp_server.py` | +345 / −51 | `memory`, `session_search`, `skill_manage` added to the exposed tool surface; `_memory_provider_bridge()` registers the active memory provider's own tools, which `EXPOSED_TOOLS` cannot express |
 | `agent/auxiliary_client.py` | +15 / −3 | Advisory (tool-less) client for `moa_reference`; task-keyed client cache |
 | `agent/model_metadata.py` | +23 | Import + step 5a0 branch delegating to `agent/acp_alias_context.py` |
 | `agent/background_review.py` | +40 | INFO lifecycle logging; stamps `_acp_restrict_to_hermes_tools` |
@@ -786,6 +849,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `tests/agent/test_copilot_acp_permission_mode_state.py` | +113 |
 | `tests/agent/test_acp_subprocess_streaming.py` | +110 (fork-only; pins that copilot-acp still streams) |
 | `tests/hermes_cli/test_inventory_external_process.py` | +104 (fork-only; the explicit-only picker hatch) |
+| `tests/agent/transports/test_memory_provider_mcp_bridge.py` | +293 (fork-only; memory-provider tools over the MCP bridge, 4 mutation-checked guards) |
 | `tests/tui_gateway/test_acp_session_provider.py` | +63 |
 | `tests/tools/test_approval_tool_allowlist.py` | +85 |
 | `tests/agent/test_copilot_acp_usage.py` | +79 |

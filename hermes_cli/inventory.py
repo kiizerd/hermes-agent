@@ -758,9 +758,35 @@ def _filter_explicit_provider_rows(rows: list[dict], ctx: ConfigContext) -> list
             # just accepted those same credentials when building it.
             kept.append(row)
             continue
+        if _external_process_provider_configured(slug):
+            # Subprocess-launched providers (copilot-acp) keep their
+            # credentials inside the spawned CLI and declare no
+            # api_key_env_vars, so the strict gate below always reports
+            # "not configured" — even though list_authenticated_providers
+            # just accepted that same launch command when it built this row.
+            # Same shape as the anthropic OAuth hatch above: a deliberate
+            # user setup that leaves no trace the strict gate can see.
+            kept.append(row)
+            continue
         if is_provider_explicitly_configured(slug):
             kept.append(row)
     return kept
+
+
+def _external_process_provider_configured(slug: str) -> bool:
+    """True when a subprocess-launched provider has a resolvable command.
+
+    Configuring an ``external_process`` provider means pointing Hermes at a
+    launch command (or an ``acp+tcp://`` endpoint), never at an API key.
+    ``get_external_process_provider_status`` is the canonical resolver for
+    that, and it returns ``{"configured": False}`` for every provider whose
+    ``auth_type`` is not ``external_process`` — so this helper is self-gating.
+    """
+    try:
+        from hermes_cli.auth import get_external_process_provider_status
+        return bool(get_external_process_provider_status(slug).get("configured"))
+    except Exception:
+        return False
 
 
 def _provider_is_keyless(slug: str) -> bool:

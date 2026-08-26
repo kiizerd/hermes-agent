@@ -218,20 +218,29 @@ def handle_connect(conn, target):
     host, _, port_text = target.rpartition(':')
     port = int(port_text or '443')
     conn.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
-    cert, key = cert_for(host)
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(cert, key)
-    with context.wrap_socket(conn, server_side=True) as tls:
-        nested = read_request(tls)
-        if not nested:
-            return
-        line = nested.split(b'\r\n', 1)[0].decode('iso-8859-1')
-        nested_target = line.split(' ', 2)[1]
-        found = file_for(host, nested_target)
-        if found is not None:
-            respond_fixture(tls, found)
-        else:
-            forward_https(tls, host, port, nested)
+    # Terminate a bounded number of tunnels concurrently. npm install on a
+    # large dependency tree opens dozens of CONNECTs at once; without a cap
+    # the proxy tries to mint a cert + wrap_socket for every one in parallel,
+    # and the upstream handshake storm resets them all at once
+    # (SSLEOFError), which aborts the install. Serializing the inbound
+    # terminate step behind the same semaphore as the outbound connect keeps
+    # the proxy's in-flight TLS count finite and matches a real (throttled)
+    # network.
+    with UPSTREAM_SEMAPHORE:
+        cert, key = cert_for(host)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        with context.wrap_socket(conn, server_side=True) as tls:
+            nested = read_request(tls)
+            if not nested:
+                return
+            line = nested.split(b'\r\n', 1)[0].decode('iso-8859-1')
+            nested_target = line.split(' ', 2)[1]
+            found = file_for(host, nested_target)
+            if found is not None:
+                respond_fixture(tls, found)
+            else:
+                forward_https(tls, host, port, nested)
 
 
 def host_from_headers(request):

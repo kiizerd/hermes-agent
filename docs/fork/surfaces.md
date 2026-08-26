@@ -24,7 +24,7 @@ the dashboard form work with no extra wiring.
 | `mcp_servers.<name>` | map | — | Upstream key. The fork now **forwards these to the ACP agent** (see below) |
 
 Read on the Python side by `_acp_config` / `_acp_config_str` / `_acp_config_list`
-(`copilot_acp_client.py:506,525,531`) — lazy `load_config_readonly`, so probe
+(`copilot_acp_client.py:726,745,751`) — lazy `load_config_readonly`, so probe
 scripts and early CLI startup cannot die on a missing config.
 
 **These are read once per ACP session, at `session/new`.** With persistent
@@ -35,7 +35,7 @@ session.
 ### Memory / skill standing instructions
 
 `_HERMES_MEMORY_INSTRUCTIONS` + `_hermes_system_prompt_append()`
-(`copilot_acp_client.py:546`) put a fixed block into
+(`copilot_acp_client.py:781,797`) put a fixed block into
 `_meta.systemPrompt.append` naming the `mcp__hermes-tools__*` memory, skill and
 session-search tools, and telling the agent not to satisfy a memory or skill
 request from its own built-in store.
@@ -139,8 +139,8 @@ and `apps/desktop/src/app/chat/composer/bridge-mode-pill.test.tsx`.
 
 `config.yaml`'s `mcp_servers:` entries are translated to ACP shape and passed at
 `session/new`, alongside the built-in `hermes-tools` bridge. Translation is
-`_acp_mcp_server_entry()` (`copilot_acp_client.py:572`); gathering and filtering
-is `_config_mcp_servers()` (`:1799`).
+`_acp_mcp_server_entry()` (`copilot_acp_client.py:868`); gathering and filtering
+is `_config_mcp_servers()` (`:2155`).
 
 Rules, each pinned by a test in `tests/agent/test_copilot_acp_client.py`:
 
@@ -175,24 +175,24 @@ loosen.
 
 ## Client API
 
-`CopilotACPClient` (`agent/copilot_acp_client.py:1179`). The methods other parts
+`CopilotACPClient` (`agent/copilot_acp_client.py:1316`). The methods other parts
 of the app are allowed to call:
 
 | Method | Line | Contract |
 |---|---|---|
-| `bind_agent(agent)` | 1263 | Weakref to the owning `AIAgent`. The client is built inside `AIAgent.__init__`, so markers the fork stamps *after* construction are read off the bound agent, not a constructor arg |
-| `set_permission_mode(mode)` | 1311 | Sets the session override and returns the effective mode. Idempotent — a no-op when unchanged, so it is safe to call every turn |
-| `permission_mode_state()` | 1329 | `{value, source, advertised, options, locked}` for a UI to render. `value` is reconciled against `options` once a session is live — see below |
-| `close()` | 1354 | Shut the subprocess down |
+| `bind_agent(agent)` | 1458 | Weakref to the owning `AIAgent`. The client is built inside `AIAgent.__init__`, so markers the fork stamps *after* construction are read off the bound agent, not a constructor arg |
+| `set_permission_mode(mode)` | 1506 | Sets the session override and returns the effective mode. Idempotent — a no-op when unchanged, so it is safe to call every turn |
+| `permission_mode_state()` | 1524 | `{value, source, advertised, options, locked}` for a UI to render. `value` is reconciled against `options` once a session is live — see below |
+| `close()` | 1681 | Shut the subprocess down |
 
-Resolution ladder, `_effective_acp_mode()` (`:1301`) then `_requested_acp_mode()`
-(`:673`): **session override → `HERMES_ACP_PERMISSION_MODE` → config → `""`**.
+Resolution ladder, `_effective_acp_mode()` (`:1496`) then `_requested_acp_mode()`
+(`:969`): **session override → `HERMES_ACP_PERMISSION_MODE` → config → `""`**.
 `source` reports which rung won.
 
 ### Counters the loop owns, and what native mode does to them
 
 Hermes offers a background skill review once `_iters_since_skill` reaches
-`skills.creation_nudge_interval` (**default 10**, `agent/agent_init.py:1918`).
+`skills.creation_nudge_interval` (**default 10**, `agent/agent_init.py:1986`).
 `agent/conversation_loop.py` bumps that counter once per pass through the
 chat-completions loop, and on an ordinary provider one user turn makes many
 passes — one per tool batch — so the threshold arrives in a handful of turns.
@@ -207,7 +207,7 @@ that asymmetry is what made the bug hard to see, and why it read as "ACP never
 updates skills" rather than as a counter problem.
 
 `_credit_native_tool_iterations()` supplies the difference from
-`_last_turn_tool_calls`, the same compensation `agent/codex_runtime.py:876`
+`_last_turn_tool_calls`, the same compensation `agent/codex_runtime.py:891`
 applies for the codex app-server path. Three guards, each load-bearing:
 
 | Guard | Why |
@@ -218,7 +218,7 @@ applies for the codex app-server path. Three guards, each load-bearing:
 
 Codex needs no `valid_tool_names` guard at its credit site because it bypasses
 the loop entirely and applies that test at the *nudge check*
-(`codex_runtime.py:889`) instead. Same invariant, two correct placements —
+(`codex_runtime.py:904`) instead. Same invariant, two correct placements —
 copying codex verbatim here would be wrong.
 
 ## Gateway RPC

@@ -28,6 +28,13 @@ Scope (what we expose):
                                            recall. Dispatched through
                                            _AGENT_LOOP_DISPATCH below, not
                                            handle_function_call.
+  - the active memory provider's own     — hindsight_retain / _recall /
+    tools (hindsight, honcho, mem0, …)     _reflect and friends. These are NOT
+                                           in tools/registry.py, so they never
+                                           appear in get_tool_definitions()
+                                           and cannot be named in
+                                           EXPOSED_TOOLS. See
+                                           _memory_provider_bridge() below.
   - kanban_* (complete/block/comment/    — kanban worker + orchestrator
     heartbeat/show/list/create/            handoff (stateless: read env var,
     unblock/link)                          write ~/.hermes/kanban.db)
@@ -66,7 +73,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +269,176 @@ _AGENT_LOOP_DISPATCH = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Memory-provider tools
+# ---------------------------------------------------------------------------
+#
+# A memory provider declares its own tools (MemoryProvider.get_tool_schemas)
+# and the live agent routes them through MemoryManager, built at agent init
+# (agent_init.py). None of that touches tools/registry.py, so those tools are
+# absent from get_tool_definitions() and unreachable by name through
+# EXPOSED_TOOLS -- the loop below would skip them as "not registered".
+#
+# The asymmetry that made this invisible: a provider's *automatic* hooks
+# (prefetch/sync_turn) run inside the parent Hermes process, so recall arrives
+# pre-injected and every turn is still ingested. Only the *explicit* tools were
+# missing, and only for native ACP/codex sessions -- which are precisely the
+# sessions whose system prompt tells the model to call them.
+#
+# We rebuild the same two pieces the agent builds -- load_memory_provider() and
+# MemoryManager -- rather than poking the provider directly, so the reserved
+# core-tool-name rule and the schema normalisation in
+# MemoryManager.add_provider() apply here exactly as they do in-agent.
+_MEMORY_BRIDGE: Optional[tuple[Any, list[dict[str, Any]]]] = None
+
+
+def _memory_provider_bridge() -> tuple[Any, list[dict[str, Any]]]:
+    """Load the configured memory provider; return ``(manager, schemas)``.
+
+    Returns ``(None, [])`` when no provider is configured, the provider is
+    unavailable, or loading raises -- the rest of the tool surface must still
+    come up. Cached: one provider instance per server process.
+    """
+    global _MEMORY_BRIDGE
+    if _MEMORY_BRIDGE is not None:
+        return _MEMORY_BRIDGE
+    _MEMORY_BRIDGE = (None, [])
+
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        section = (load_config_readonly() or {}).get("memory")
+        name = str((section or {}).get("provider") or "").strip()
+    except Exception:
+        logger.debug("memory provider: config load failed", exc_info=True)
+        return _MEMORY_BRIDGE
+    if not name:
+        return _MEMORY_BRIDGE
+
+    try:
+        from agent.memory_manager import MemoryManager
+        from hermes_constants import get_hermes_home
+        from plugins.memory import load_memory_provider
+
+        provider = load_memory_provider(name)
+        if provider is None:
+            logger.info("memory provider %r not found; tools not bridged", name)
+            return _MEMORY_BRIDGE
+        if not provider.is_available():
+            logger.info(
+                "memory provider %r unavailable; tools not bridged", name
+            )
+            return _MEMORY_BRIDGE
+
+        # Same initialize() contract agent_init.py uses. It is NOT optional:
+        # provider tool handlers read attributes that only initialize()
+        # assigns (hindsight resolves its bank_id template there and sets
+        # _observation_scopes / _recall_tags / _retain_tags), so an
+        # uninitialised provider raises on the first call.
+        #
+        # HERMES_SESSION_ID / HERMES_HOME / HERMES_PROFILE are forwarded into
+        # this subprocess by the caller, so session identity and the profile
+        # that agent_identity derives from resolve to the same values the
+        # parent used. HERMES_PLATFORM is only forwarded when the parent had
+        # it; absent, we take the same "cli" default agent_init falls back to.
+        _init_kwargs: dict[str, Any] = {
+            "session_id": os.environ.get("HERMES_SESSION_ID", "") or "",
+            "platform": os.environ.get("HERMES_PLATFORM", "") or "cli",
+            "hermes_home": str(get_hermes_home()),
+            "agent_context": "primary",
+        }
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+
+            _init_kwargs["agent_identity"] = get_active_profile_name()
+            _init_kwargs["agent_workspace"] = "hermes"
+        except Exception:
+            logger.debug("memory provider: profile identity unresolved", exc_info=True)
+
+        provider.initialize(**_init_kwargs)
+
+        manager = MemoryManager()
+        manager.add_provider(provider)
+        schemas = manager.get_all_tool_schemas()
+    except Exception:
+        logger.exception("memory provider %r failed to load; tools not bridged", name)
+        return _MEMORY_BRIDGE
+
+    logger.info(
+        "memory provider %r bridged %d tool(s): %s",
+        name,
+        len(schemas),
+        ", ".join(s.get("name", "?") for s in schemas) or "-",
+    )
+    _MEMORY_BRIDGE = (manager, schemas)
+    return _MEMORY_BRIDGE
+
+
+def _shutdown_memory_bridge() -> None:
+    """Tear down the bridged provider so in-flight retains get a chance to land.
+
+    The provider owns background threads (hindsight's retain writer) whose
+    daemon status means an abrupt exit silently drops queued work.
+    """
+    manager = (_MEMORY_BRIDGE or (None, []))[0]
+    if manager is None:
+        return
+    try:
+        manager.shutdown_all()
+    except Exception:
+        logger.debug("memory provider shutdown failed", exc_info=True)
+
+
+def _make_mcp_handler(
+    tool_name: str,
+    schema: dict | None,
+    description: str,
+    dispatch: Callable[[str, dict[str, Any]], str],
+) -> Any:
+    """Wrap one Hermes tool as an MCP-callable function.
+
+    The SDK derives a tool's input schema from its callable's signature --
+    there is no inputSchema parameter on either the decorator or add_tool().
+    So the closure carries a ``__signature__`` synthesized from the Hermes
+    JSON Schema (see :func:`_signature_from_schema`).
+    """
+    sig, annots = _signature_from_schema(schema)
+
+    def _dispatch(**kwargs: Any) -> str:
+        try:
+            # Filter out None values before dispatch so unset optionals
+            # aren't forwarded to the handler.
+            args = {k: v for k, v in kwargs.items() if v is not None}
+            return dispatch(tool_name, args or {})
+        except Exception as exc:
+            logger.exception("tool %s raised", tool_name)
+            return json.dumps({"error": str(exc), "tool": tool_name})
+
+    _dispatch.__name__ = tool_name
+    _dispatch.__doc__ = description
+    _dispatch.__signature__ = sig
+    _dispatch.__annotations__ = {**annots, "return": str}
+    return _dispatch
+
+
+def _add_mcp_tool(
+    mcp: Any,
+    name: str,
+    description: str,
+    params_schema: dict | None,
+    dispatch: Callable[[str, dict[str, Any]], str],
+) -> None:
+    """Register one tool on the MCP server, tolerating older SDK signatures."""
+    handler = _make_mcp_handler(name, params_schema, description, dispatch)
+    try:
+        mcp.add_tool(handler, name=name, description=description)
+    except TypeError:
+        # Older mcp SDK signature -- fall back to decorator-style. The
+        # synthesized __signature__ on the handler still drives schema
+        # generation there.
+        mcp.tool(name=name, description=description)(handler)
+
+
 def _build_server() -> Any:
     """Create the MCP server with Hermes tools attached. Lazy imports
     so the module can be imported without the mcp package installed
@@ -301,7 +478,14 @@ def _build_server() -> Any:
         if isinstance(td, dict) and td.get("type") == "function"
     }
 
+    def _core_dispatch(tool_name: str, args: dict[str, Any]) -> str:
+        override = _AGENT_LOOP_DISPATCH.get(tool_name)
+        if override is not None:
+            return override(args)
+        return handle_function_call(tool_name, args)
+
     exposed_count = 0
+    registered: set[str] = set()
 
     for name in EXPOSED_TOOLS:
         spec = all_defs.get(name)
@@ -313,54 +497,46 @@ def _build_server() -> Any:
 
         description = spec.get("description") or f"Hermes {name} tool"
         params_schema = spec.get("parameters") or {"type": "object", "properties": {}}
-
-        # The SDK wants a Python callable and derives the input schema from
-        # its signature — there is no inputSchema parameter on either the
-        # decorator or add_tool(). So build a closure that takes the arguments
-        # dict, dispatches via handle_function_call, returns the result
-        # string, and carries a __signature__ synthesized from the Hermes
-        # JSON Schema (see _signature_from_schema) for the SDK to read.
-        def _make_handler(tool_name: str, schema: dict | None):
-            sig, annots = _signature_from_schema(schema)
-
-            def _dispatch(**kwargs: Any) -> str:
-                try:
-                    # Filter out None values before dispatch so unset optionals
-                    # aren't forwarded to the handler.
-                    args = {k: v for k, v in kwargs.items() if v is not None}
-                    override = _AGENT_LOOP_DISPATCH.get(tool_name)
-                    if override is not None:
-                        return override(args or {})
-                    return handle_function_call(tool_name, args or {})
-                except Exception as exc:
-                    logger.exception("tool %s raised", tool_name)
-                    return json.dumps({"error": str(exc), "tool": tool_name})
-
-            _dispatch.__name__ = tool_name
-            _dispatch.__doc__ = description
-            _dispatch.__signature__ = sig
-            _dispatch.__annotations__ = {**annots, "return": str}
-            return _dispatch
-
-        try:
-            mcp.add_tool(
-                _make_handler(name, params_schema),
-                name=name,
-                description=description,
-            )
-        except TypeError:
-            # Older mcp SDK signature — fall back to decorator-style. The
-            # synthesized __signature__ on the handler still drives schema
-            # generation there.
-            handler = _make_handler(name, params_schema)
-            handler = mcp.tool(name=name, description=description)(handler)
-
+        _add_mcp_tool(mcp, name, description, params_schema, _core_dispatch)
+        registered.add(name)
         exposed_count += 1
 
+    # Memory-provider tools, registered after the curated list so a provider
+    # can never displace a Hermes tool of the same name. This matters because
+    # MCPServer.add_tool accepts a duplicate name SILENTLY, last writer wins
+    # (probed) -- an unguarded collision would replace the Hermes tool rather
+    # than raise. MemoryManager.add_provider() already rejects provider tools
+    # named after a `_HERMES_CORE_TOOLS` entry, and every current EXPOSED_TOOLS
+    # name is one, so today that layer catches it first; the check below covers
+    # the case it cannot -- an exposed tool that is not a core tool.
+    memory_manager, memory_schemas = _memory_provider_bridge()
+    memory_count = 0
+    if memory_manager is not None:
+        for schema in memory_schemas:
+            name = schema.get("name")
+            if not name:
+                continue
+            if name in registered:
+                logger.warning(
+                    "memory provider tool %r shadows an exposed Hermes tool; "
+                    "skipping", name,
+                )
+                continue
+            _add_mcp_tool(
+                mcp,
+                name,
+                schema.get("description") or f"Memory provider {name} tool",
+                schema.get("parameters") or {"type": "object", "properties": {}},
+                memory_manager.handle_tool_call,
+            )
+            registered.add(name)
+            memory_count += 1
+
     logger.info(
-        "hermes-tools MCP server registered %d/%d tools",
+        "hermes-tools MCP server registered %d/%d tools (+%d memory-provider)",
         exposed_count,
         len(EXPOSED_TOOLS),
+        memory_count,
     )
     return mcp
 
@@ -397,6 +573,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.exception("hermes-tools MCP server crashed")
         sys.stderr.write(f"hermes-tools MCP server error: {exc}\n")
         return 1
+    finally:
+        # Providers own daemon threads; an abrupt exit drops queued retains.
+        _shutdown_memory_bridge()
     return 0
 
 

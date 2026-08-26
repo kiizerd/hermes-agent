@@ -33,6 +33,21 @@ MAX_REQUEST_BYTES = 65536
 UPSTREAM_TIMEOUT_SECONDS = 30
 CERT_VALIDITY_DAYS = 2
 
+# Bounded upstream concurrency. npm install against a large dependency tree
+# opens many simultaneous HTTPS connections at once; without a cap the proxy
+# fans them all out and the upstream (npm CDN) resets a share of the
+# handshakes, which surfaces inside the sandbox as
+# ``SSLEOFError: UNEXPECTED_EOF_WHILE_READING`` and aborts the install. A real
+# network also throttles concurrency, so this keeps the fake Internet faithful
+# while preventing the burst from killing the run.
+MAX_UPSTREAM_CONNECTIONS = 8
+UPSTREAM_SEMAPHORE = threading.Semaphore(MAX_UPSTREAM_CONNECTIONS)
+
+# Upstream TLS handshakes (and the connections behind them) occasionally reset
+# mid-flight under concurrency. A single transient reset must not fail the
+# whole install, so retry the connect+handshake a few times before giving up.
+UPSTREAM_CONNECT_RETRIES = 3
+
 
 def read_request(conn):
     data = b""
@@ -150,12 +165,36 @@ def relay(source, destination):
         destination.sendall(chunk)
 
 
-def forward_https(conn, host, port, request):
+def _connect_upstream(host, port):
+    """Open a TLS connection to the upstream, retrying transient resets.
+
+    Under concurrent load the upstream (npm CDN, etc.) sometimes resets the
+    TLS handshake with ``SSLEOFError: UNEXPECTED_EOF_WHILE_READING``. That is a
+    transient condition a browser/npm would ride over by retrying, so we do
+    the same rather than letting one dropped handshake abort the whole
+    install. Bounded by UPSTREAM_SEMAPHORE so the retry fan-out itself cannot
+    overwhelm the upstream.
+    """
     context = ssl.create_default_context(cafile=str(REAL_CA))
-    with socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS) as raw:
-        with context.wrap_socket(raw, server_hostname=host) as upstream:
-            upstream.sendall(close_request(request))
-            relay(upstream, conn)
+    last_error = None
+    for attempt in range(1, UPSTREAM_CONNECT_RETRIES + 1):
+        try:
+            with UPSTREAM_SEMAPHORE:
+                raw = socket.create_connection(
+                    (host, port), timeout=UPSTREAM_TIMEOUT_SECONDS
+                )
+                return context.wrap_socket(raw, server_hostname=host)
+        except (ssl.SSLEOFError, ssl.SSLWantReadError, OSError) as error:
+            last_error = error
+            if attempt < UPSTREAM_CONNECT_RETRIES:
+                continue
+    raise last_error
+
+
+def forward_https(conn, host, port, request):
+    with _connect_upstream(host, port) as upstream:
+        upstream.sendall(close_request(request))
+        relay(upstream, conn)
 
 
 def forward_http(conn, host, port, request, target):
@@ -163,9 +202,15 @@ def forward_http(conn, host, port, request, target):
     path = parsed.path or '/'
     if parsed.query:
         path += f'?{parsed.query}'
-    with socket.create_connection((host, port), timeout=UPSTREAM_TIMEOUT_SECONDS) as upstream:
-        upstream.sendall(close_request(request, path))
-        relay(upstream, conn)
+    # Bounded like the HTTPS path: keep concurrent upstream connects finite so
+    # a large install's burst cannot reset connections faster than the proxy
+    # can open them.
+    with UPSTREAM_SEMAPHORE:
+        with socket.create_connection(
+            (host, port), timeout=UPSTREAM_TIMEOUT_SECONDS
+        ) as upstream:
+            upstream.sendall(close_request(request, path))
+            relay(upstream, conn)
 
 
 def handle_connect(conn, target):

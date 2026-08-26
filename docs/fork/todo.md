@@ -7,13 +7,14 @@ fix. Move a row to [`changes.md`](changes.md) once it lands.
 
 **Found:** 2026-08-15
 
-`toolsets.py:275-285` defines the `desktop_ui` toolset — `read_terminal`,
-`close_terminal`, `open_preview`, `read_preview`, `read_window_below`,
-`focus_pane`, `react_to_message`, `setup_mcp` — enabled only when the GUI
-gateway detects a desktop-app session (`tui_gateway/server.py:4383`,
+`toolsets.py:252-262` defines the `desktop_ui` toolset — `read_terminal`,
+`close_terminal`, `open_preview`, `close_preview`, `read_preview`,
+`drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`,
+`react_to_message`, `setup_mcp`, `tour` — enabled only when the GUI
+gateway detects a desktop-app session (`tui_gateway/server.py:5251`,
 `surfaces.add("desktop_ui")`).
 
-`agent/transports/hermes_tools_mcp_server.py:129-181` is the MCP tool
+`agent/transports/hermes_tools_mcp_server.py:129-182` is the MCP tool
 catalogue both `codex_app_server` and `copilot-acp` (Claude-via-ACP)
 subprocesses get instead of Hermes' native loop. `EXPOSED_TOOLS` omits every
 name in `desktop_ui`. The comment at `:120-128` justifies dropping
@@ -27,13 +28,13 @@ preview pane — had to hand the user a `MEDIA:` link instead.
 Adding the names to `EXPOSED_TOOLS` is necessary but not sufficient.
 `tools/desktop_ui.py` dispatches through a module-level `_emit` callback
 wired once per process by `tui_gateway/server.py::_wire_desktop_ui()`
-(`:10114-10130`), closed over the live WebSocket for a session. The MCP
+(`tui_gateway/server.py:11209-11225`), closed over the live WebSocket for a session. The MCP
 server is a *separate* OS process — spawned per
-`agent/copilot_acp_client.py:1840` (`-m
+`agent/copilot_acp_client.py:2150` (`-m
 agent.transports.hermes_tools_mcp_server`) — so that `_emit` is never set
 there; calling `open_preview` from inside it today would find no emitter
 installed. The subprocess is only handed `HERMES_SESSION_ID`
-(`copilot_acp_client.py:1829`), and that env var is currently read by exactly
+(`copilot_acp_client.py:2139`), and that env var is currently read by exactly
 one dispatcher, `_dispatch_session_search`
 (`hermes_tools_mcp_server.py:220-248`) — nothing routes a desktop_ui call
 back into the gateway process for that session id.
@@ -63,19 +64,21 @@ const elicitationSupport = { form: !!this.clientCapabilities?.elicitation?.form,
 const disallowedTools = elicitationSupport.form ? [] : ["AskUserQuestion"];
 ```
 
-Hermes' handshake in `agent/copilot_acp_client.py:2229-2234` never sends an
+Hermes' handshake in `agent/copilot_acp_client.py:2225-2247` never sends an
 `elicitation` key:
 
 ```python
 "clientCapabilities": {
-    "fs": {"readTextFile": True, "writeTextFile": True}
+    "fs": {"readTextFile": True, "writeTextFile": True},
+    "_meta": {"jetbrains": {"air": {"version": 1,
+                                     "capabilities": ["sessionFailure"]}}},
 },
 ```
 
 so `elicitationSupport.form` is always false and `AskUserQuestion` is
 unconditionally in `disallowedTools`. This is **not** mode-gated — the
 Bridge/Native `system_prompt_mode` switch (`_effective_system_prompt_mode()`,
-`copilot_acp_client.py:1579`) only touches the `systemPrompt` payload sent at
+`copilot_acp_client.py:1575`) only touches the `systemPrompt` payload sent at
 `session/new`, never `clientCapabilities`, which is negotiated once at
 `initialize` before any session opens (same "no resend RPC" constraint that
 makes the Bridge pill pre-session-only). Confirmed via grep — no
@@ -83,7 +86,7 @@ makes the Bridge pill pre-session-only). Confirmed via grep — no
 
 **Fix:** two parts, not a flag flip.
 1. Add `"elicitation": {"form": True}` (and maybe `"url"`) to the
-   `clientCapabilities` dict at `copilot_acp_client.py:2229`.
+   `clientCapabilities` dict at `copilot_acp_client.py:2225`.
 2. Implement the matching render/response leg on the Hermes side: once the
    capability is declared, `claude-agent-acp` will start sending elicitation
    requests over the ACP connection when `AskUserQuestion` is called. Nothing
@@ -111,31 +114,31 @@ advertises — `default`, `plan`, `acceptEdits`, `bypassPermissions` for
 `claude-agent-acp@0.64.2`. There is no entry for the *unset* state, even
 though unset is a real, documented, and behaviourally distinct mode.
 
-`_requested_acp_mode()` (`agent/copilot_acp_client.py:820-845`) returns the
-raw configured string. `_select_acp_mode()` (`:848-881`) matches it against
-`_acp_mode_ids(session)` exactly (`:862`) then case-insensitively (`:864`);
+`_requested_acp_mode()` (`agent/copilot_acp_client.py:969-994`) returns the
+raw configured string. `_select_acp_mode()` (`:997-1029`) matches it against
+`_acp_mode_ids(session)` exactly (`:1011`) then case-insensitively (`:1013`);
 on no match it logs and **returns without sending `session/set_mode` at all**
-(`:865-872`), leaving the child on whatever mode it started in. An empty
-string takes the same no-RPC path. The docstring at `:823-825` states this is
+(`:1014-1021`), leaving the child on whatever mode it started in. An empty
+string takes the same no-RPC path. The docstring at `:972-974` states this is
 deliberate — "an unset value leaves the agent on whatever mode it chose for
 itself" — so *passthrough is a supported mode*; it simply has no id, so
 nothing can offer it in a list built from advertised ids.
 
 **The user reached it by accident.** `copilot_acp.permission_mode: auto` was
 set in `~/.hermes/config.yaml`. `auto` is not an advertised id, so it fell
-down the same `:865-872` no-match path as empty, no `session/set_mode` was
+down the same `:1014-1021` no-match path as empty, no `session/set_mode` was
 ever sent, and the child ran on its own start mode — which asked for zero
-permissions, so Hermes' `session/request_permission` handler (`:2835-2977`)
+permissions, so Hermes' `session/request_permission` handler (`:3009-3256`)
 never fired and no approval cards appeared. Changing the value to `default`
 made the RPC land for the first time and the cards returned. Note the config
-file is **not** validated on load: `tui_gateway/acp_session_modes.py:385-425`
+file is **not** validated on load: `tui_gateway/acp_session_modes.py:385-424`
 rejects an unknown id with error 4002, but only for RPC-driven `config.set`,
 so a junk value in YAML degrades silently into passthrough.
 
 Two things are unresolved and must be settled before implementing:
 
 1. **Why the child's own start mode asks for nothing.** Not established.
-   `_select_acp_mode`'s docstring (`:851-854`) notes a `settings.json`
+   `_select_acp_mode`'s docstring (`copilot_acp_client.py:1000-1003`) notes a `settings.json`
    `defaultMode` is only read on paths that see the real `HOME`, which the
    `claude-acp-run.js` launcher wrapper hides — so the child is falling back
    to some built-in default. Whether that default is genuinely permissive, or
@@ -160,5 +163,5 @@ not "Auto", which reads like a Hermes feature rather than an abdication.
 
 Verify out-of-process per invariant 5: pick the option in a live Claude Sub
 ACP session and confirm from the log that no `session/set_mode` is sent
-(`:878` stays silent) and that the pill still reads back the chosen value
+(`copilot_acp_client.py:1027` stays silent) and that the pill still reads back the chosen value
 after a reconnect.

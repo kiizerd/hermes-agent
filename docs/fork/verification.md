@@ -5,6 +5,28 @@ How claims about this fork get proven. The rule is invariant 5 in the
 Python module loads once at process start, and the desktop UI is a prebuilt
 bundle — an edit is not evidence.
 
+## Memory-provider MCP bridge — what is proven, and what is not
+
+`a53eb4e2c1` was verified module-probe style, but against the **real** hindsight
+service rather than a stub: import the edited
+`agent/transports/hermes_tools_mcp_server`, call `_memory_provider_bridge()`,
+build a real `MCPServer`, and drive `hindsight_recall` / `hindsight_retain`
+end to end. Results, on this box:
+
+- 3 tools registered on the server; `hindsight_recall` returned stored facts;
+  `hindsight_retain` returned `Memory stored successfully`; an unknown tool
+  routed to a clean `No memory provider handles tool` error.
+- Round trip closed: a fact retained through the bridge came back as the top
+  hit of a later `hindsight_recall`.
+- Mutation control: disabling the bridge takes the server 13 → 10 tools —
+  exactly the 3, so nothing else accounts for them.
+
+**Not yet proven, and it needs a restart:** that the tools arrive over the real
+ACP wire as `mcp__hermes-tools__hindsight_*` in a live Claude session. The MCP
+server subprocess is spawned at session start, so the session that wrote the fix
+is by definition running the old one. Per invariant 5 this stays unproven until
+a fresh session lists them — do not upgrade the claim before then.
+
 ## Probe harnesses
 
 They live at `~/.hermes-acp/` (outside the repo, because they hardcode machine
@@ -100,6 +122,7 @@ python -m pytest tests/acp/ \
   tests/agent/test_copilot_acp_permission_mode_state.py \
   tests/agent/test_acp_claude_alias_context.py \
   tests/agent/transports/test_hermes_tools_mcp_server.py \
+  tests/agent/transports/test_memory_provider_mcp_bridge.py \
   tests/scripts/test_fork_signature_drift.py \
   tests/scripts/test_fork_ref_drift.py \
   tests/tools/test_memory_disk_sync.py \

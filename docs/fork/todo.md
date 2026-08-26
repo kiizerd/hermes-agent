@@ -166,47 +166,35 @@ ACP session and confirm from the log that no `session/set_mode` is sent
 (`copilot_acp_client.py:1027` stays silent) and that the pill still reads back the chosen value
 after a reconnect.
 
-## Plugin-registered tools never reach an ACP subprocess (hindsight_retain and friends)
+## Provider tools other than memory still cannot reach an ACP subprocess
 
-**Found:** 2026-08-26
+**Found:** 2026-08-26 (narrowed from the resolved memory-provider case)
 
-`EXPOSED_TOOLS` (`agent/transports/hermes_tools_mcp_server.py:129-182`) is a
-static tuple, and `_build_server()` iterates exactly it (`:306`). Nothing
-consults the plugin registry. So a tool that a plugin registers at runtime can
-never be offered to a native agent over the bridge, however configured it is.
+`EXPOSED_TOOLS` (`agent/transports/hermes_tools_mcp_server.py`) is a static
+tuple of names, and `_build_server()` resolves each one against
+`get_tool_definitions()`. Anything a plugin declares outside `tools/registry.py`
+is therefore unreachable *and unnameable* — adding the name changes nothing,
+because the lookup misses and the loop `continue`s.
 
-The live case: `memory.provider: hindsight` registers `hindsight_retain`,
-`hindsight_recall` and `hindsight_reflect`
-(`plugins/memory/hindsight/__init__.py:355,386`). None is in `EXPOSED_TOOLS`.
-Confirmed from inside a Claude-via-ACP session — the session's own system prompt
-says *"Use hindsight_recall to search … hindsight_retain to store facts"*, and
-none of the three is callable. The instruction is live, the tools are not.
+The memory-provider half of this landed in `a53eb4e2c1`
+(`_memory_provider_bridge()`, see [changes.md](changes.md)). What remains is
+every other ABC that follows the same declare-your-own-tools pattern:
 
-Reads still work, which is what hides it. `HindsightProvider.prefetch()`
-(`:1935`) and `sync_turn()` (`:2080`) run **server-side** in the Hermes process,
-so recalled facts arrive injected into context and each turn is ingested
-automatically. From the agent's side that looks like a working memory system
-right up until it tries to retain a specific fact deliberately, which is exactly
-when a user asks it to.
+- context engines — `agent/context_engine.py:413` `get_tool_schemas()` /
+  `:421` `handle_tool_call()`, routed in-agent at `agent/tool_executor.py:2435`
+- the context compressor — same shape, `agent/agent_init.py:2914`
 
-Net effect for this fork: the `memory` tool an ACP agent *can* reach is the
-char-capped local store (which is what sits at 97% full), while the uncapped
-provider the operator actually configured is write-only-by-accident — reachable
-by automatic turn sync, unreachable on purpose.
+Neither is bridged. A native ACP or codex session with a context engine
+configured gets its automatic behaviour and none of its tools, which is the
+exact asymmetry the memory case had.
 
-Same shape as the `desktop_ui` gap above, one layer earlier: that one is a
-missing name in the allowlist, this one is that the allowlist cannot express
-plugin tools at all.
+**Fix:** generalise `_memory_provider_bridge()` into one "declared-tool
+providers" pass rather than adding a second copy per ABC. The broader version is
+to derive the exposed set from the session's toolsets instead of a literal,
+which is what "surface capability is a property of the SESSION" argues for in
+AGENTS.md — but that changes what every `codex_app_server` run sees too, so it
+wants its own change.
 
-**Fix:** the narrow version is to fold the active memory provider's registered
-tool names into `EXPOSED_TOOLS` at build time — the provider is already known
-from `memory.provider`, and `_AGENT_LOOP_DISPATCH` (`:258`) is the precedent for
-routing a name the plain dispatcher refuses. The broader version is to derive
-the exposed set from the session's toolsets rather than a literal, which is what
-"surface capability is a property of the SESSION" argues for in AGENTS.md.
-Prefer the narrow one first; the broad one changes what every codex_app_server
-run sees too.
-
-Verify out-of-process per invariant 5: from a live Claude Sub ACP session, call
-`hindsight_retain` and then confirm the fact comes back through a later
-session's auto-recall — not merely that the tool appears in the list.
+Do not start this before a real consumer exists: no context engine is configured
+on this box, so today it would be speculative infrastructure by the AGENTS.md
+definition. Recorded here so the *shape* is not rediscovered from scratch.

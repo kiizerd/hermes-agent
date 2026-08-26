@@ -813,9 +813,12 @@ def _hermes_system_prompt_append() -> str:
 # guidance off `agent.valid_tool_names` -- Hermes' OWN toolset -- but the
 # session those tools reach is a Claude Code subprocess, and the two lists do
 # not line up in either direction:
-#   * Only the fixed allowlist in agent/transports/hermes_tools_mcp_server.py
-#     (EXPOSED_TOOLS) crosses the MCP boundary, and it arrives prefixed. So
-#     `web_search` in the prose is really `mcp__hermes-tools__web_search`.
+#   * Only the allowlist in agent/transports/hermes_tools_mcp_server.py
+#     (EXPOSED_TOOLS, plus the active memory provider's own tools via
+#     _memory_provider_bridge) crosses the MCP boundary, and it arrives
+#     prefixed. So `web_search` in the prose is really
+#     `mcp__hermes-tools__web_search`, and `hindsight_recall` is really
+#     `mcp__hermes-tools__hindsight_recall`.
 #   * Tools OUTSIDE that allowlist -- `terminal`, `read_file`, `write_file`,
 #     `delegate_task`, `computer_use`, `todo` -- are not renamed, they are
 #     absent. The subprocess covers that ground with its own native tools.
@@ -2136,7 +2139,18 @@ class CopilotACPClient:
             # and any non-ASCII tool result raises mid-protocol.
             {"name": "PYTHONIOENCODING", "value": "utf-8"},
         ]
-        for var in ("HERMES_HOME", "HERMES_PROFILE", "HERMES_SESSION_ID"):
+        # HERMES_SESSION_ID / HERMES_HOME / HERMES_PROFILE are also what let
+        # the server's memory-provider bridge resolve the SAME identity the
+        # parent used -- session tags, the profile agent_identity derives
+        # from, and any bank_id_template interpolating them. HERMES_PLATFORM
+        # rides along when the launcher set it; the bridge falls back to
+        # agent_init's own "cli" default when it did not.
+        for var in (
+            "HERMES_HOME",
+            "HERMES_PROFILE",
+            "HERMES_SESSION_ID",
+            "HERMES_PLATFORM",
+        ):
             value = os.environ.get(var)
             if value:
                 env.append({"name": var, "value": value})

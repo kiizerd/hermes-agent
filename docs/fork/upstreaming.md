@@ -55,12 +55,12 @@ Nous accepting anything.
 Beyond the features: pointing `origin` at the fork **disarms `hermes update`**.
 
 Before, HEAD was not an ancestor of `origin/main`, so the
-`git merge --ff-only origin/<branch>` path in `update_cmd.py` (~`:4248`) failed
-and the fallback steered to `git reset --hard origin/<branch>` (~`:4275`) —
+`git merge --ff-only origin/<branch>` path in `update_cmd.py` (~`:6835`) failed
+and the fallback steered to `git reset --hard origin/<branch>` (~`:6906`) —
 silently dropping every local commit.
 
-With `origin` on the fork, `_is_fork(origin_url)` (`update_cmd.py:1495`) returns
-True, and `_sync_with_upstream_if_needed` (`:1583`) early-returns at `:1656`:
+With `origin` on the fork, `_is_fork(origin_url)` (`update_cmd.py:2358`) returns
+True, and `_sync_with_upstream_if_needed` (`:2446`) early-returns at `:2522`:
 
 ```python
 if origin_ahead > 0:

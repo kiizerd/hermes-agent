@@ -1,12 +1,21 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **86 files, +12,773 / −324**.
+against the merge base: **91 files, +13,572 / −325**.
 
-Last verified against `upstream/main` at `00c12dac613` (2026-08-16). When you
+Last verified against `upstream/main` at `f0187332d13` (2026-08-26). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
 [surfaces.md](surfaces.md) and [wire-contracts.md](wire-contracts.md) — they are
 the first thing an upstream merge invalidates.
+
+A **rebase** invalidates a second thing, and the numbers do not show it: it
+rewrites every fork commit, so each `### <sha>` heading below names an object
+that is unreachable from the new HEAD and absent from a fresh clone. Re-key them
+by matching subject lines against `git log --format='%h %s' <merge-base>..HEAD`,
+and make the tool verify both subjects are byte-identical before it writes —
+a mis-paired heading re-keys an entry onto the wrong commit and reads as
+correct forever. A merge never had this problem, which is why it first bit on
+2026-08-26.
 
 Regenerate the raw numbers with:
 
@@ -40,7 +49,7 @@ else's uncommitted work.
 
 ## Ledger
 
-### `7317630d8d9` — Claude Code as a first-class ACP provider
+### `6cb7f21c3b` — Claude Code as a first-class ACP provider
 
 The foundation. 25 files, +2,397 / −239; `copilot_acp_client.py` alone is
 +1,423 / −150.
@@ -53,9 +62,14 @@ Turns the provider from prompt-scraping into a native ACP client:
 - **Persistent sessions.** One ACP session spans turns instead of one per
   completion. `_ensure_session()` builds or reuses; turn 2+ logs
   `ACP session REUSED: sending N new message(s)`.
-- **Streaming.** `agent/conversation_loop.py` stops excluding `copilot-acp` from
-  the streaming path; `_acp_stream_chunk()` shapes ACP updates into the chunk
-  form the rest of Hermes expects.
+- **Streaming.** Upstream excludes every `acp://` base URL from the streaming
+  path; `agent/conversation_loop.py:3166` carves `copilot-acp` back out **by
+  provider**, because this client really does yield OpenAI-style chunks.
+  `_acp_stream_chunk()` shapes ACP updates into the chunk form the rest of
+  Hermes expects. Not cosmetic: non-streaming suppresses `reasoning_callback`
+  whenever a stream consumer is registered, so excluding this provider leaves
+  the desktop Thought pane empty for every ACP turn. Pinned from the other side
+  by `tests/agent/test_acp_subprocess_streaming.py` — see `7ce54a4dfc`.
 - **Permission gate.** `session/request_permission` is routed to Hermes' real
   approval gate instead of being auto-answered.
 - **Hermes tools over MCP.** `_hermes_tools_mcp_servers()` hands the agent a
@@ -71,64 +85,64 @@ Turns the provider from prompt-scraping into a native ACP client:
   explicit `claude-opus-4-8` → "Opus 4.8" entry in `model-status-label.ts`.
 - **CLI:** provider label `Claude Sub ACP`, Opus 4.8 catalog entry.
 
-### `12c997ba522` — per-target approval keys for ACP tool calls
+### `615cdf6aa9` — per-target approval keys for ACP tool calls
 
 `copilot_acp_client.py` only, +30 / −12. The approval pattern key becomes
 `copilot-acp:{tool}:{sha256(target)[:12]}`. Choosing `[a]lways` on one path no
 longer blesses every other path through the same tool, and content churn does
 not invalidate the key because only the target string is hashed.
 
-### `60d33231eb9` — expose `skill_manage` over the Hermes tools MCP bridge
+### `14cda734cd` — expose `skill_manage` over the Hermes tools MCP bridge
 
 The bridge exposed `skill_view`/`skills_list` but not `skill_manage`, so an ACP
 agent could read the skill library and not maintain it.
 
-### `7d92ffd32d2` — test ACP tool-call approval routing
+### `31c372f03d` — test ACP tool-call approval routing
 
 +225 lines of test driving the real `_handle_server_message` with a fake
 process. Written after the routing shipped broken once (see
 [`wire-contracts.md`](wire-contracts.md) — permission RPCs carry no `toolName`).
 
-### `9d1cd12d0cb` — plumb per-turn token usage from ACP prompt results
+### `e8b6054b31` — plumb per-turn token usage from ACP prompt results
 
 `_acp_usage_chunk()` reads the usage block off the `session/prompt` result so
 per-turn token counts stop reading as zero.
 
-### `bf910f5c497` — auto-approve non-shell ACP tools via `approvals.tool_allowlist`
+### `275df6f4f7` — auto-approve non-shell ACP tools via `approvals.tool_allowlist`
 
 Adds `tools/approval.py::is_tool_allowlisted()` and `_match_tool_allowlist()`.
 `command_allowlist` only ever reached shell commands; non-shell tools (`Edit`,
 `Write`, `skill_manage`, …) had no auto-approval path at all and gated on exact
 match. Grant-only: the list can approve, never deny.
 
-### `d48c5b9f6f8` — recover ACP permission `toolName` from the streamed `tool_call`
+### `9a348d52b3` — recover ACP permission `toolName` from the streamed `tool_call`
 
 A real `session/request_permission` carries `kind`, not `toolName` — that rides
 the `session/update` notifications. `_remember_tool_name()` / `_recall_tool_name()`
 keep a call-id → name map from the stream so the permission card can show what
 tool is actually asking.
 
-### `7bc5cff06fc` — build MoA reference advisors tool-less over ACP
+### `3349170b8c` — build MoA reference advisors tool-less over ACP
 
 `agent/auxiliary_client.py`, +14 / −2. `CopilotACPClient(advisory=True)` opens
 the session with `tools: []` and no MCP servers, so a MoA reference advisor
 holds zero tools. Also keys the client cache by task for `copilot-acp`, or an
 advisory client could be handed to a `moa_aggregator` call.
 
-### `18d0d4db077` — log the background-review fork lifecycle at INFO
+### `7630ad6149` — log the background-review fork lifecycle at INFO
 
 `agent/background_review.py`, +41. The fork had three `logger.warning` and zero
 `logger.info`, so "never fired" and "fired and wrote nothing" looked identical.
 Three INFO lines now: requested / fork starting / finished with an action count.
 
-### `abe35b6e10e` — offer ACP agent models in the setup wizard, not the GitHub catalog
+### `be09c7075a` — offer ACP agent models in the setup wizard, not the GitHub catalog
 
 `_model_flow_copilot_acp` branches on `_copilot_acp_is_rerouted()`. Rerouted, it
 offers `provider_model_ids("copilot-acp")` and skips `fetch_github_model_catalog`
 + `normalize_copilot_model_id` — GitHub-id mappers with no Claude counterpart.
 The `/model` picker already took this route; only the wizard showed GitHub ids.
 
-### `a8cfe70a10a` — per-session ACP permission mode, a desktop pill, and config MCP forwarding
+### `72bca45349` — per-session ACP permission mode, a desktop pill, and config MCP forwarding
 
 24 files, +1,606 / −10. Three related pieces:
 
@@ -155,7 +169,7 @@ expanded (`load_config_readonly`, not `read_raw_config`) or the entry is dropped
 a config entry cannot shadow `hermes-tools`. Kill switch:
 `HERMES_ACP_CONFIG_MCP=off`.
 
-### `3b99488b985` — track the Claude ACP launcher in-repo
+### `0670c18680` — track the Claude ACP launcher in-repo
 
 `claude-acp/claude-acp-run.js` +126 (new), `claude-acp/claude-acp-run.sh` +102
 (new), plus doc updates in `upstreaming.md` and `verification.md`.
@@ -188,7 +202,7 @@ provider back to bridge mode.
 
 Upstream-bound: no. This is fork infrastructure.
 
-### `721a1d3cd33` — memory/skill standing instructions, and the Bridge pill
+### `f04a1b2ce2` — memory/skill standing instructions, and the Bridge pill
 
 Two related pieces, both about who owns the ACP session's system prompt. They
 interleave in `_build_session_meta`, so they landed together.
@@ -233,7 +247,7 @@ first:
 Excluded from native mode regardless of the pick: advisory sessions and the
 background memory/skill review fork.
 
-### `5c1d1aafe2e` — context window for bare Claude Code aliases
+### `f452b7f89d` — context window for bare Claude Code aliases
 
 `agent/model_metadata.py` +68, `tests/agent/test_acp_claude_alias_context.py`
 +146 (new).
@@ -260,7 +274,7 @@ rather than silently reintroducing the fallback.
 
 Upstream-bound: the aliases and the resolver are both upstream code.
 
-### `205cef42f92` — run the ACP child in the session's selected project
+### `2f8ab52c36` — run the ACP child in the session's selected project
 
 `agent/copilot_acp_client.py` +50 / −2, `tests/agent/test_copilot_acp_client.py`
 +83.
@@ -285,12 +299,12 @@ Two ordering constraints, both load-bearing:
 
 Upstream-bound: yes. Any ACP provider wants the child in the session's project.
 
-**Shipped dead — completed by `e71ac8491b0`.** Nothing ever passed the
+**Shipped dead — completed by `a9822e1bfd`.** Nothing ever passed the
 `gateway_session_key` kwarg this reads, so the session lookup was skipped on
 every real session and the fallback to `os.getcwd()` still ran. Tests green,
 `git status` clean, and the only tell was the child's actual working directory.
 
-### `8e4e132dad0` — pass `single_query_deny_message` to the approval gate
+### `939cd1471d` — pass `single_query_deny_message` to the approval gate
 
 `agent/copilot_acp_client.py` +6.
 
@@ -316,10 +330,10 @@ Caught by `test_always_on_one_path_does_not_bless_another`, which spies on the
 that shape for every fork call site into upstream code; a stub would have
 swallowed the signature change.
 
-Upstream has the identical omission at its own `tools/file_tools.py:1005`
+Upstream has the identical omission at its own `tools/file_tools.py:1010`
 (`ssh_config_write`) — untouched by the fork, so that one is upstream's to fix.
 
-### `d6559b01d4f` — move ACP session modes out of `tui_gateway/server.py`
+### `4b7f77dee3` — move ACP session modes out of `tui_gateway/server.py`
 
 4 files, +492 / −366 (this commit's own diff). Measured against the merge base
 instead, `tui_gateway/server.py` goes from +371 to **+42**; its content lands in
@@ -361,7 +375,7 @@ PASS after being repointed at the new module), `tests/test_tui_gateway_server.py
 (585 passed under `run_tests.sh`), and the gating set (811 passed, 1 pre-existing
 `test_ping_suppression` failure).
 
-### `b9954f0bff3` — move the ACP alias context table into a fork-only module
+### `0e0e581fdd` — move the ACP alias context table into a fork-only module
 
 5 files, +169 / −78 (this commit's own diff). Against the merge base,
 `agent/model_metadata.py` goes from +68 to **+23**; the table lands in a new
@@ -420,7 +434,7 @@ outlives the TypeScript detail: **55 of the 72 lines are values, not types**
 (`types.ts` is +17; the rest is string literals), and declaration merging is a
 type-level tool with no mechanism for injecting runtime values.
 
-### `5391e207772` — add a post-rebase signature-drift check
+### `a804e376de` — add a post-rebase signature-drift check
 
 4 files, +1,591 / −1. Two new fork-only files
 (`scripts/fork/signature_drift.py` +882, `tests/scripts/test_fork_signature_drift.py`
@@ -485,7 +499,7 @@ display string is not a cache identity.
 Current state: `--against upstream/main` is clean across 1,511 first-party call
 sites in 22 fork files, so the 12 unpulled upstream commits break no call site.
 
-### `51158f78f` — route native ACP approvals through the full guard stack
+### `c76ca3940b` — route native ACP approvals through the full guard stack
 
 7 files, +936 / −32. Two unrelated gaps that share a root: native mode routes
 around the machinery Hermes normally runs, and both times the bypass was silent.
@@ -535,7 +549,7 @@ of ~10 tool iterations. Memory review is turn-counted rather than
 iteration-counted and kept working throughout — that asymmetry is why this read
 as "ACP never updates skills" rather than as a counter problem. Tally the
 `tool_call` notifications and supply the difference, the same compensation
-`codex_runtime.py:876` applies for the codex app-server path.
+`codex_runtime.py:891` applies for the codex app-server path.
 
 The credit copies **both** conditions the loop puts on its own increment, not
 just the interval. An agent without `skill_manage` in `valid_tool_names` is never
@@ -551,7 +565,7 @@ HEAD (`test_ping_suppression` asyncio teardown, three `symlink_to` calls needing
 a Windows privilege this box does not hold). Both are now recorded in
 `verification.md` so the next run does not chase them.
 
-### `9ec26c7632` — make the heavy CI lanes resolve on a fork
+### `509478cc23` — make the heavy CI lanes resolve on a fork
 
 6 files, +15 / −15 (one `runs-on` and one `timeout-minutes` per lane, plus the
 Python worker count).
@@ -577,7 +591,7 @@ runs-on: ${{ github.repository == 'NousResearch/hermes-agent' && 'ubuntu-latest-
 | `tests.yml:24` | Python tests | `ubuntu-latest-96-core` | `ubuntu-latest` |
 | `js-tests.yml:17` | JS & TS checks | `ubuntu-latest-32-core` | `ubuntu-latest` |
 | `rust-tests.yml:33` | Rust tests | `ubuntu-latest-32-core` | `ubuntu-latest` |
-| `tests-os.yml:52` | Windows-only tests | `windows-latest-32-core` | `windows-latest` |
+| `tests-os.yml:51` | Windows-only tests | `windows-latest-32-core` | `windows-latest` |
 | `nix.yml:57` | nix flake check | `ubuntu-latest-32-core` | `ubuntu-latest` |
 | `e2e-desktop.yml:23` | Desktop E2E | `ubuntu-latest-32-core` | `ubuntu-latest` |
 
@@ -603,6 +617,105 @@ preserves upstream's value verbatim on the left, which makes the resolution
 fork deleted upstream's runner. It is also upstreamable as-is — it fixes CI for
 every fork, not just this one. If upstream takes it, this entry retires.
 
+### `7ce54a4dfc` — pin that a subprocess ACP turn still streams
+
+Test-only. 1 file, +110.
+
+Upstream's `613164dadc fix(acp): key the ACP runtime exclusions on the scheme,
+not on one vendor` widened the streaming exclusion in
+`agent/conversation_loop.py` from this one provider to every `acp://` base URL,
+and shipped `test_an_acp_provider_turn_never_asks_for_a_stream`
+(`tests/agent/test_acp_provider_rails.py:80`) to hold it there. That is a
+head-on collision with `6cb7f21c3b`, which exists in part to make this provider
+stream.
+
+Resolved by keying the carve-out on the **provider** rather than the scheme
+(`conversation_loop.py:3166`). Upstream's test passes unchanged — its fake
+client reports `provider=unknown` — and the split matches how the client is
+actually routed: `create_openai_client` sends only the `copilot-acp` provider
+and `acp://copilot` base URLs to `CopilotACPClient`
+(`agent/agent_runtime_helpers.py:2601`), so a generic `acp://` vendor never
+reaches a client that could stream anyway. Upstream's scheme-wide rule stays
+correct for every case it was written for.
+
+`test_a_copilot_acp_turn_asks_for_a_stream` pins the other direction, which
+nothing did before: upstream forbids `acp://` streaming, no test asserted
+`copilot-acp` still streams, so a future widening would blank the Thought pane
+with a green suite. Mutation-verified — restoring the scheme-only condition
+fails it.
+
+**Rebase note.** Fork-only file, not an edit to upstream's
+`test_acp_provider_rails.py`, so the test itself carries zero conflict surface.
+The `conversation_loop.py` condition is the standing conflict; this test is what
+tells you the resolution got lost.
+
+### `b85fc82451` — keep configured `external_process` providers in explicit-only pickers
+
+2 files, +130. `hermes_cli/inventory.py` is +26 of it.
+
+Every Claude model vanished from the desktop model selectors. Not the ACP
+client and not a stale build — a filter.
+
+The picker always sends `explicit_only: true`
+(`apps/desktop/src/lib/model-options.ts:97`), which runs
+`_filter_explicit_provider_rows` (`hermes_cli/inventory.py:711`). The provider
+clears the credential check and dies on the gate after it:
+`is_provider_explicitly_configured()` reads auth.json `active_provider`,
+config.yaml `model.provider`, MoA slots, and API-key env vars.
+`external_process` providers touch none of them — `copilot-acp` declares
+`api_key_env_vars = ()` and is configured by pointing Hermes at a launch
+command, which that function never consults.
+
+Only the `slug == current_slug` hatch kept the row alive, which makes the picker
+chicken-and-egg: it offers Claude solely when you are already on Claude. Point
+`model.provider` anywhere else and every Claude model disappears.
+
+The new hatch (`inventory.py:755`) sits directly beside the anthropic-OAuth one,
+which exists for the identical shape — a deliberate user setup that leaves no
+trace the strict gate can see. Reachability is answered by
+`_external_process_provider_configured()` (`:770`) delegating to
+`get_external_process_provider_status()` (`hermes_cli/auth.py:7263`), which
+self-gates on `auth_type` and resolves the launch command with `shutil.which`.
+Reusing that rather than hardcoding one vendor means a second `external_process`
+provider inherits the fix instead of re-reporting the bug.
+
+Not a blanket opt-out: the filter still cuts 12 rows to 6, and an
+`external_process` provider whose command does not resolve is still dropped
+(`test_an_unconfigured_external_process_provider_is_still_dropped`).
+
+**Rebase note.** `inventory.py` was untouched by all 485 upstream commits in the
+2026-08-26 window, so this applied clean. Upstreamable as-is — the gap is
+upstream's own auth-type blind spot, not a fork artifact.
+
+### `91006de09b` — add a post-rebase reference-drift check
+
+2 files, +391. Fork-only, additive.
+
+`docs/fork/*.md` carries two kinds of pointer a rebase breaks without touching
+a character of the docs: `<file>:<line>` refs into upstream code, and
+`### <sha>` ledger headings. The 2026-08-26 rebase broke both at once —
+`_acp_config` slid 506 → 726, `_config_mcp_servers` 1799 → 2155,
+`_requested_acp_mode` 820 → 969, and all 22 fork SHAs became unreachable from
+the new HEAD. Every one of those line refs still *resolved*, because the files
+are thousands of lines long, so no diff, test run, or lint pass could see it.
+
+Three checks gate, each a fact rather than a guess: a ref names a file that is
+missing; a ref names a line past the end of that file; a `### <sha>` names a
+commit unreachable from HEAD or no commit at all. The range check is what
+caught three live bare `:NNNN` continuation refs in `todo.md` that had
+inherited the wrong filename — invisible to a reader who already knew which
+file was meant.
+
+`--anchors` adds a heuristic pass over the symbols each paragraph names in
+backticks. Off by default: on the rebase that motivated the tool it produced
+27 false positives against 3 real finds, because a paragraph routinely names
+the Hermes-side function while the ref points at its codex-side counterpart.
+A gate that cries wolf gets ignored.
+
+**A clean run is not verification** and the tool says so on exit. It proves no
+ref is broken, not that a ref still points at the right function. Advancing the
+`Last verified` line above still means reading them.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -617,8 +730,8 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `agent/model_metadata.py` | +23 | Import + step 5a0 branch delegating to `agent/acp_alias_context.py` |
 | `agent/background_review.py` | +40 | INFO lifecycle logging; stamps `_acp_restrict_to_hermes_tools` |
 | `agent/agent_runtime_helpers.py` | +4 | `client.bind_agent(agent)` |
-| `agent/conversation_loop.py` | +14 / −9 | Stops excluding `copilot-acp` from streaming |
-| `agent/display.py` | +13 / −1 | `build_tool_preview` fallback keys |
+| `agent/conversation_loop.py` | +23 / −10 | Carves `copilot-acp` back out of upstream's scheme-wide streaming exclusion |
+| `agent/display.py` | +20 / −2 | `build_tool_preview` fallback keys |
 | `agent/turn_context.py` | +12 | MemoryStore staleness reload |
 | `tools/memory_tool.py` | +71 | Cross-process MemoryStore sync |
 | `tools/approval.py` | +259 / −18 | `approvals.tool_allowlist` for non-shell tools; `smart_tool_verdict` + `_smart_approve_tool`, the tool-shaped entry to smart approval |
@@ -631,9 +744,10 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `hermes_cli/model_setup_flows.py` | +55 / −33 | Wizard offers agent models when rerouted |
 | `hermes_cli/model_switch.py` | +22 | `/model` picker routing |
 | `hermes_cli/models.py` | +48 / −2 | `_copilot_acp_is_rerouted()`, Opus 4.8 entry |
+| `hermes_cli/inventory.py` | +26 | `external_process` hatch in `_filter_explicit_provider_rows` |
 | `hermes_cli/providers.py`, `auth.py` | +1 / −1 each | Provider label `Claude Sub ACP` |
 | `plugins/model-providers/copilot-acp/__init__.py` | +2 / −2 | Plugin metadata |
-| `tui_gateway/server.py` | +42 | Call sites only — import (re-exports the two `_info` fns for `methods_config.py`), `session.info` unpack, turn-start apply, `config.set` delegation |
+| `tui_gateway/server.py` | +58 | Call sites only — import (re-exports the two `_info` fns for `methods_config.py`), `session.info` unpack, turn-start apply, `config.set` delegation |
 | `tui_gateway/methods_config.py` | +21 | `config.get permission_mode` |
 
 ### Desktop (TypeScript — needs a rebuild to take effect)
@@ -659,20 +773,27 @@ Where the fork touches upstream code, and what to check after a rebase.
 | File | Δ |
 |---|---|
 | `tests/scripts/test_fork_signature_drift.py` | +622 (fork-only; synthetic fixtures, plus a live guard over the real fork) |
+| `tests/scripts/test_fork_ref_drift.py` | +145 (fork-only; synthetic fixtures, plus a live guard over the real docs) |
 | `tests/agent/test_copilot_acp_approval_routing.py` | +895 |
 | `tests/agent/test_copilot_acp_skill_iterations.py` | +245 (fork-only; native tool-iteration credit) |
 | `tests/agent/test_copilot_acp_client.py` | +353 / −1 |
 | `tests/agent/test_copilot_acp_system_prompt_mode.py` | +303 (bridge/native wire shape, exclusions, lock) |
 | `tests/agent/transports/test_hermes_tools_mcp_server.py` | +258 |
-| `tests/agent/test_acp_claude_alias_context.py` | +146 |
+| `tests/agent/test_copilot_acp_edit_preview.py` | +236 (inline diff previews for native ACP edits) |
+| `tests/agent/test_acp_claude_alias_context.py` | +200 |
+| `tests/tui_gateway/test_acp_system_prompt_mode_latch.py` | +192 |
 | `tests/tools/test_memory_disk_sync.py` | +128 |
+| `tests/agent/test_copilot_acp_permission_mode_state.py` | +113 |
+| `tests/agent/test_acp_subprocess_streaming.py` | +110 (fork-only; pins that copilot-acp still streams) |
+| `tests/hermes_cli/test_inventory_external_process.py` | +104 (fork-only; the explicit-only picker hatch) |
+| `tests/tui_gateway/test_acp_session_provider.py` | +63 |
 | `tests/tools/test_approval_tool_allowlist.py` | +85 |
 | `tests/agent/test_copilot_acp_usage.py` | +79 |
 | `tests/run_agent/test_streaming.py` | +53 / −47 |
 | `tests/hermes_cli/test_setup_model_provider.py` | +52 / −1 |
 | `tests/agent/test_empty_tool_name_loop_dampening.py` | +17 / −2 (restores `sys.modules` — upstream bug, see verification) |
 | `tests/hermes_cli/test_{api_key_providers,model_validation}.py` | +1 / −1 each (label) |
-| Desktop `*.test.tsx` / `*.test.ts` | +570 across 7 files |
+| Desktop `*.test.tsx` / `*.test.ts` | +590 / −1 across 8 files |
 
 ### CI (one line each — upstream owns these files)
 
@@ -692,7 +813,8 @@ Upstream has no file at these paths, so they can never conflict.
 | File | Δ | Role |
 |---|---|---|
 | `scripts/fork/signature_drift.py` | +882 | Post-rebase signature-drift check: AST call-site index, three-way signature resolution, `Signature.bind` verdict |
-| `tui_gateway/acp_session_modes.py` | +434 | Permission-mode and bridge/native session modes: 7 helpers, 2 `config.set` arms, injected server helpers |
+| `scripts/fork/ref_drift.py` | +246 | Post-rebase reference-drift check: `file.py:line` refs and ledger SHAs in `docs/fork/*.md` |
+| `tui_gateway/acp_session_modes.py` | +528 | Permission-mode and bridge/native session modes: 7 helpers, 2 `config.set` arms, injected server helpers |
 | `agent/acp_alias_context.py` | +73 | Context windows for bare Claude Code aliases: table, ACP provider set, exact-match resolver |
 | `claude-acp/claude-acp-run.js` | +126 | Windows launcher. Scrubbed-env allowlist; `ENABLE_TOOL_SEARCH=false`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` |
 | `claude-acp/claude-acp-run.sh` | +102 | POSIX variant, held at parity |

@@ -101,6 +101,7 @@ python -m pytest tests/acp/ \
   tests/agent/test_acp_claude_alias_context.py \
   tests/agent/transports/test_hermes_tools_mcp_server.py \
   tests/scripts/test_fork_signature_drift.py \
+  tests/scripts/test_fork_ref_drift.py \
   tests/tools/test_memory_disk_sync.py \
   tests/tools/test_approval_tool_allowlist.py \
   tests/agent/test_empty_tool_name_loop_dampening.py \
@@ -119,6 +120,39 @@ cd apps/desktop && npx vitest run && npx tsc --noEmit
 different things: the canonical runner isolates per file, so it structurally
 cannot see cross-test `sys.modules` pollution. The same file set has been green
 under `run_tests.sh` and shown 11 failures under one-process pytest.
+
+## Reference drift — the pointers a rebase breaks silently
+
+`scripts/fork/ref_drift.py`. Fork-only, additive, no upstream file at that path.
+
+The problem it solves: on 2026-08-26 a 485-commit rebase moved every symbol
+this knowledge base points at, and orphaned all 22 ledger SHAs. The line refs
+still resolved — `copilot_acp_client.py` is ~3,300 lines, so `:506` names
+*something* no matter what — and the SHAs still existed locally in the reflog.
+Nothing failed. The docs simply became confidently wrong.
+
+```bash
+python scripts/fork/ref_drift.py             # gate: broken refs, dangling SHAs
+python scripts/fork/ref_drift.py --anchors   # noisy sweep, for a manual pass
+python scripts/fork/ref_drift.py --verbose   # print passing refs too
+```
+
+Exit 1 on any missing file, out-of-range line, or unreachable SHA. **Run it
+after every rebase, before touching the `Last verified` line in
+[changes.md](changes.md).**
+
+Re-point a drifted ref by locating the symbol its paragraph names — never by
+applying an offset. The shift is not uniform: on the 2026-08-26 rebase one
+region of `copilot_acp_client.py` moved +137 and another +356.
+
+Re-key a dangling SHA by matching subject lines against
+`git log --format='%h %s' <merge-base>..HEAD`, and have the tool assert both
+subjects are byte-identical before it writes. A mis-paired heading re-keys an
+entry onto the wrong commit and then reads as correct forever.
+
+`tests/scripts/test_fork_ref_drift.py::test_the_real_fork_docs_have_no_broken_refs_today`
+runs the gate over the real docs, so the standard gating set catches drift
+automatically once a rebase has landed.
 
 ## Signature drift — the break textual tooling cannot see
 

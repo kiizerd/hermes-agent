@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **92 files, +14,218 / −365**.
+against the merge base: **95 files, +14,344 / −394**.
 
 Last verified against `upstream/main` at `f0187332d13` (2026-08-26). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -779,6 +779,27 @@ server 13 → 10 tools, exactly the 3. All four guards in
 dropping the registration block, skipping `initialize()`, removing the shadow
 guard, and dropping the shutdown drain each turn the suite red.
 
+### `718d4efc28` — deflake the measure-at-unmount offset cache test
+
+1 file, +6 / −4. Upstream-owned test; upstreamable as-is.
+
+`ui-tui/src/__tests__/virtualHistoryOffsetCache.test.ts` "corrects and
+compensates a same-layout row measured at unmount" failed twice on fork CI
+(2026-08-26, `7230283` and `afe0702`) with `adjustScrollTop` at 0 calls
+instead of 1, passing on the run between — a scheduler flake, not a
+regression. The test raced blind `delay(20)`/`delay(40)` waits against React
+commits: measure-at-unmount only fires when the reconciler calls `ref(null)`
+on a row that actually mounted, and on a loaded runner the `scrollTo(0)`
+commit that mounts item-0 can land after the fixed 20 ms wait. The
+`scrollTo(5)` that follows shares snapshot bin 0 (`QUANTUM = 10`), so no
+second commit ever rescues the mount — the rerender then unmounts nothing and
+the spy stays at zero.
+
+Fix per upstream's own flake policy (event-based sync, no fixed timing):
+three `vi.waitFor` polls on facts — scroll handle present, item-0 mounted
+(`virtualHistory.start === 0`), spy fired — replacing the fixed delays.
+10/10 local stress runs green.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -858,6 +879,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `tests/agent/test_empty_tool_name_loop_dampening.py` | +17 / −2 (restores `sys.modules` — upstream bug, see verification) |
 | `tests/hermes_cli/test_{api_key_providers,model_validation}.py` | +1 / −1 each (label) |
 | Desktop `*.test.tsx` / `*.test.ts` | +590 / −1 across 8 files |
+| `ui-tui/src/__tests__/virtualHistoryOffsetCache.test.ts` | +6 / −4 (deflake; upstream-owned, upstreamable) |
 
 ### CI (one line each — upstream owns these files)
 

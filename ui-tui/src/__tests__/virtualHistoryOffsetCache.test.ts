@@ -528,20 +528,22 @@ describe('useVirtualHistory offset cache reuse', () => {
     })
 
     try {
-      await delay(20)
+      await vi.waitFor(() => expect(expose.current?.scroll).toBeTruthy())
       const scroll = expose.current!.scroll!
 
       scroll.scrollTo(0)
-      await delay(20)
+      // Wait for the commit that mounts item-0: measure-at-unmount can only
+      // fire for a row that was actually mounted, and a fixed delay races the
+      // commit on slow CI runners.
+      await vi.waitFor(() => expect(expose.current!.virtualHistory.start).toBe(0))
       scroll.scrollTo(5)
       const adjustScrollTop = vi.spyOn(scroll, 'adjustScrollTop')
       const staleHeights = new Map(initialHeights)
 
       staleHeights.set(items[0]!.key, 1)
       instance.rerender(React.createElement(Harness, { expose, initialHeights: staleHeights, items }))
-      await delay(40)
+      await vi.waitFor(() => expect(adjustScrollTop).toHaveBeenCalledOnce())
 
-      expect(adjustScrollTop).toHaveBeenCalledOnce()
       expect(adjustScrollTop).toHaveBeenCalledWith(1)
       expect(scroll.getScrollTop()).toBe(6)
       expect(scroll.isSticky()).toBe(false)

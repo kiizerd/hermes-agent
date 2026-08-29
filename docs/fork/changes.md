@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **95 files, +14,344 / −394**.
+against the merge base: **97 files, +15,307 / −414**.
 
 Last verified against `upstream/main` at `f0187332d13` (2026-08-26). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -800,6 +800,54 @@ three `vi.waitFor` polls on facts — scroll handle present, item-0 mounted
 (`virtualHistory.start === 0`), spy fired — replacing the fixed delays.
 10/10 local stress runs green.
 
+### `4b6cc08a38` — on-disk known-good config generations
+
+2 files, +777 / −20. The fork's first commit in `hermes_cli/config.py`.
+
+Upstream already keeps a last-known-good config, but only in a module global
+(`_LAST_EXPANDED_CONFIG_BY_PATH`). That covers a running process whose user
+mid-edits `config.yaml` into broken YAML; it dies with the process. On
+2026-08-27 a `config.yaml` truncated during a desktop build swap loaded as bare
+`DEFAULT_CONFIG` in the next process, and the in-memory tier had gone with the
+old one.
+
+Adds a disk tier behind the same restore path. `_snapshot_known_good` rotates
+three byte copies (`config.yaml.lkg.1..3`) after any parse that provably
+succeeded; `_load_known_good` walks them newest-first when the live file fails
+to parse. A generation that no longer parses is skipped, never deleted.
+
+Three details carry the correctness:
+
+- **A restored generation re-enters the normal pipeline** instead of
+  short-circuiting it. `user_config` and the `_deep_merge` are hoisted out of
+  the `try:` block so restored and live loads walk the same merge → normalize →
+  expand → managed-overlay chain. Short-circuiting would pass an "is my value
+  there?" test while silently dropping the `max_turns` migration and `${VAR}`
+  expansion.
+- **A restored config is never snapshotted back**, guarded by `parsed_live_file`
+  — the flag exists only because that hoist made the success path reachable from
+  the failure path. Without it every load against a still-broken file rotates
+  the restored copy into slot 1 and walks real history off the 3-slot ring.
+- **A missing `config.yaml` must not register in the in-process tier.** Upstream
+  wrote that dict on every successful load, including loads where the file did
+  not exist and the "loaded config" is just `DEFAULT_CONFIG`; the read side only
+  checks presence, so that defaults snapshot outranked the disk tier.
+
+A restore is never silent: `_warn_config_parse_failure` gained a
+`known-good-file` wording that names the generation and its save time on
+stderr. `describe_known_good()` lists what is on disk, and `hermes config edit`
+validates on editor exit so a broken save is caught then rather than at the
+next process start.
+
+Shaped for rebases: helpers are one contiguous block near the top of the file,
+and the loader changes are three small edits at the tail of `_load_config_impl`
+rather than a restructure. Surfaces and invariants in
+[surfaces.md](surfaces.md); 24 tests in
+`tests/hermes_cli/test_config_known_good.py`, all gated on a live
+`_snapshot_known_good` body so a rebase that reverts the helper block turns the
+suite red instead of quietly skipping. 154 further tests green across the
+existing config suites cover the `_load_config_impl` restructure.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -824,6 +872,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 
 | File | Δ | Role |
 |---|---|---|
+| `hermes_cli/config.py` | +325 / −20 | On-disk known-good generations: `_lkg_path`, `_snapshot_known_good`, `_load_known_good`, `describe_known_good`, the `known-good-file` warn arm, three edits at the tail of `_load_config_impl`, and `config edit` validation |
 | `hermes_cli/config_defaults.py` | +46 | The `copilot_acp:` config block |
 | `hermes_cli/model_setup_flows.py` | +55 / −33 | Wizard offers agent models when rerouted |
 | `hermes_cli/model_switch.py` | +22 | `/model` picker routing |
@@ -858,6 +907,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 |---|---|
 | `tests/scripts/test_fork_signature_drift.py` | +622 (fork-only; synthetic fixtures, plus a live guard over the real fork) |
 | `tests/scripts/test_fork_ref_drift.py` | +145 (fork-only; synthetic fixtures, plus a live guard over the real docs) |
+| `tests/hermes_cli/test_config_known_good.py` | +452 (fork-only; every write-half test gated on a live `_snapshot_known_good` body) |
 | `tests/agent/test_copilot_acp_approval_routing.py` | +895 |
 | `tests/agent/test_copilot_acp_skill_iterations.py` | +245 (fork-only; native tool-iteration credit) |
 | `tests/agent/test_copilot_acp_client.py` | +353 / −1 |

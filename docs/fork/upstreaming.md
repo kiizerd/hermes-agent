@@ -59,7 +59,7 @@ Before, HEAD was not an ancestor of `origin/main`, so the
 and the fallback steered to `git reset --hard origin/<branch>` (~`:6906`) —
 silently dropping every local commit.
 
-With `origin` on the fork, `_is_fork(origin_url)` (`update_cmd.py:2358`) returns
+With `origin` on the fork, `_is_fork(origin_url)` (`update_cmd.py:2626`) returns
 True, and `_sync_with_upstream_if_needed` (`:2446`) early-returns at `:2522`:
 
 ```python

@@ -7,7 +7,7 @@ bundle — an edit is not evidence.
 
 ## Memory-provider MCP bridge — what is proven, and what is not
 
-`84eef60d2a` was verified module-probe style, but against the **real** hindsight
+`40dd169958` was verified module-probe style, but against the **real** hindsight
 service rather than a stub: import the edited
 `agent/transports/hermes_tools_mcp_server`, call `_memory_provider_bridge()`,
 build a real `MCPServer`, and drive `hindsight_recall` / `hindsight_retain`
@@ -306,13 +306,27 @@ Confirmed identical on a clean `upstream/main` worktree:
   An unmarked host-dependent test — it would need `@pytest.mark.linux_only` plus
   a `windows_only` sibling to be correct. Confirmed identical with the fork's
   `hermes_cli/config.py` patch stashed, 2026-08-27. Upstream-bound.
-- Desktop vitest: ~19 failures across `electron/ssh-*`, `desktop-installation`,
-  `git-worktree-ops`, `windows-hermes-path`, `stage-native-deps`,
-  `markdown-text`. All Windows-path shaped, e.g. a test asserting
-  `/\/[0-9a-f]{16}\.sock$/` against `\tmp\d\7d8fab2028b2913f.sock`.
+- Desktop vitest (`--project electron`): **34 failures across 9 files**, recounted
+  2026-08-28 after the 243-commit rebase. `electron/ssh-connection` (11),
+  `electron/hardening` (8), `electron/git-repo-scan` (5),
+  `electron/managed-ssh-update` (3), `electron/ssh-config` (3),
+  `electron/desktop-installation` (1), `electron/git-worktree-ops` (1),
+  `electron/windows-hermes-path` (1), `scripts/stage-native-deps` (1).
+  All POSIX-semantics-on-Windows: `chmod`/owner-only mode bits, unix control
+  sockets, `symlink_to`, darwin media-library paths, the Swift helper binary —
+  e.g. a test asserting `/\/[0-9a-f]{16}\.sock$/` against
+  `\tmp\d\7d8fab2028b2913f.sock`.
+  The previous entry read "~19 across 6 groups"; `hardening` and `git-repo-scan`
+  are new upstream arrivals in this jump and `markdown-text` has stopped failing.
+  Attribution is a proof, not a comparison: `git diff upstream/main -- \
+  apps/desktop/electron apps/desktop/scripts` is **empty**, so every failing file
+  and every source it imports is byte-identical to upstream. The fork owns none
+  of it.
 
 Before blaming a new failure on a local change, reproduce it clean:
-`git worktree add "$TEMP/hermes_base" upstream/main`.
+`git worktree add "$TEMP/hermes_base" upstream/main`. When the failing subtree
+turns out to have *zero* fork diff, that diff is the stronger answer and skips
+the `npm ci` — ownership beats reproduction.
 
 ### An upstream test polluter the fork patches
 

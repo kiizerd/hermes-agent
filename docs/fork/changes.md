@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **97 files, +15,334 / −414**.
+against the merge base: **98 files, +15,378 / −419**.
 
 Last verified against `upstream/main` at `ac6c8028e00` (2026-08-28). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in
@@ -861,6 +861,39 @@ rather than a restructure. Surfaces and invariants in
 suite red instead of quietly skipping. 154 further tests green across the
 existing config suites cover the `_load_config_impl` restructure.
 
+### `2f99394996` — forward `SYSTEMDRIVE` to the hermetic test environment
+
+1 file, +10 / −5. Upstream-owned, upstreamable, and the fork's first commit in
+`scripts/run_tests.sh`.
+
+The runner drops the environment with `env -i` and forwards an explicit
+allowlist of Windows location variables, on the stated rationale that keeping
+the list short is what keeps the "no credential can leak" property auditable at
+a glance. `SYSTEMDRIVE` was missing from it.
+
+Windows stores the ProgramData path in the registry as a `REG_EXPAND_SZ` of the
+literal `%SystemDrive%\ProgramData`. With `SYSTEMDRIVE` unset,
+`ExpandEnvironmentStringsW` leaves it unexpanded, and the resulting drive-less
+string resolves *relative to the current directory* — so a test run silently
+creates a `%SystemDrive%/ProgramData/Microsoft/Windows/Caches/` tree in the repo
+root. It reads like a stray artifact from a misbehaving test; nothing in the
+suite is doing it, the shell is.
+
+Verified as an A/B against the two environments rather than asserted:
+
+```
+without SYSTEMDRIVE: CSIDL_COMMON_APPDATA -> '%SystemDrive%\ProgramData'
+with    SYSTEMDRIVE: CSIDL_COMMON_APPDATA -> 'C:\ProgramData'
+```
+
+Narrow on purpose. `PROGRAMDATA`, `PUBLIC`, `PATHEXT` and `COMSPEC` are the
+obvious next candidates and were left out — each is speculative until a run
+actually fails without it, and the file's whole design is that the list stays
+short enough to read. Same class as the gap the allowlist comment already cites
+(#67385, #70813); the list was incomplete, not wrong. `SYSTEMDRIVE` is a
+location variable, not a credential, and is forwarded only when set, so POSIX
+runs are byte-for-byte unchanged.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.
@@ -943,6 +976,7 @@ Where the fork touches upstream code, and what to check after a rebase.
 | `tests/hermes_cli/test_{api_key_providers,model_validation}.py` | +1 / −1 each (label) |
 | Desktop `*.test.tsx` / `*.test.ts` | +590 / −1 across 8 files |
 | `ui-tui/src/__tests__/virtualHistoryOffsetCache.test.ts` | +6 / −4 (deflake; upstream-owned, upstreamable) |
+| `scripts/run_tests.sh` | +10 / −5 (`SYSTEMDRIVE` in the `env -i` allowlist; upstream-owned, upstreamable) |
 
 ### CI (one line each — upstream owns these files)
 

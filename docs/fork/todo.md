@@ -11,7 +11,7 @@ fix. Move a row to [`changes.md`](changes.md) once it lands.
 `close_terminal`, `open_preview`, `close_preview`, `read_preview`,
 `drive_preview`, `annotate_preview`, `read_window_below`, `focus_pane`,
 `react_to_message`, `setup_mcp`, `tour` — enabled only when the GUI
-gateway detects a desktop-app session (`tui_gateway/server.py:5251`,
+gateway detects a desktop-app session (`tui_gateway/server.py:5877`,
 `surfaces.add("desktop_ui")`).
 
 `agent/transports/hermes_tools_mcp_server.py:129-182` is the MCP tool
@@ -28,15 +28,15 @@ preview pane — had to hand the user a `MEDIA:` link instead.
 Adding the names to `EXPOSED_TOOLS` is necessary but not sufficient.
 `tools/desktop_ui.py` dispatches through a module-level `_emit` callback
 wired once per process by `tui_gateway/server.py::_wire_desktop_ui()`
-(`tui_gateway/server.py:11209-11225`), closed over the live WebSocket for a session. The MCP
+(`tui_gateway/server.py:12197-12225`), closed over the live WebSocket for a session. The MCP
 server is a *separate* OS process — spawned per
-`agent/copilot_acp_client.py:2150` (`-m
+`agent/copilot_acp_client.py:2164` (`-m
 agent.transports.hermes_tools_mcp_server`) — so that `_emit` is never set
 there; calling `open_preview` from inside it today would find no emitter
 installed. The subprocess is only handed `HERMES_SESSION_ID`
-(`copilot_acp_client.py:2139`), and that env var is currently read by exactly
+(`copilot_acp_client.py:2151`), and that env var is currently read by exactly
 one dispatcher, `_dispatch_session_search`
-(`hermes_tools_mcp_server.py:220-248`) — nothing routes a desktop_ui call
+(`hermes_tools_mcp_server.py:227-256`) — nothing routes a desktop_ui call
 back into the gateway process for that session id.
 
 **Fix:** two parts.
@@ -64,7 +64,7 @@ const elicitationSupport = { form: !!this.clientCapabilities?.elicitation?.form,
 const disallowedTools = elicitationSupport.form ? [] : ["AskUserQuestion"];
 ```
 
-Hermes' handshake in `agent/copilot_acp_client.py:2225-2247` never sends an
+Hermes' handshake in `agent/copilot_acp_client.py:2235-2269` never sends an
 `elicitation` key:
 
 ```python
@@ -78,7 +78,7 @@ Hermes' handshake in `agent/copilot_acp_client.py:2225-2247` never sends an
 so `elicitationSupport.form` is always false and `AskUserQuestion` is
 unconditionally in `disallowedTools`. This is **not** mode-gated — the
 Bridge/Native `system_prompt_mode` switch (`_effective_system_prompt_mode()`,
-`copilot_acp_client.py:1575`) only touches the `systemPrompt` payload sent at
+`copilot_acp_client.py:1578`) only touches the `systemPrompt` payload sent at
 `session/new`, never `clientCapabilities`, which is negotiated once at
 `initialize` before any session opens (same "no resend RPC" constraint that
 makes the Bridge pill pre-session-only). Confirmed via grep — no
@@ -86,7 +86,7 @@ makes the Bridge pill pre-session-only). Confirmed via grep — no
 
 **Fix:** two parts, not a flag flip.
 1. Add `"elicitation": {"form": True}` (and maybe `"url"`) to the
-   `clientCapabilities` dict at `copilot_acp_client.py:2225`.
+   `clientCapabilities` dict at `copilot_acp_client.py:2239`.
 2. Implement the matching render/response leg on the Hermes side: once the
    capability is declared, `claude-agent-acp` will start sending elicitation
    requests over the ACP connection when `AskUserQuestion` is called. Nothing
@@ -114,7 +114,7 @@ advertises — `default`, `plan`, `acceptEdits`, `bypassPermissions` for
 `claude-agent-acp@0.64.2`. There is no entry for the *unset* state, even
 though unset is a real, documented, and behaviourally distinct mode.
 
-`_requested_acp_mode()` (`agent/copilot_acp_client.py:969-994`) returns the
+`_requested_acp_mode()` (`agent/copilot_acp_client.py:972-997`) returns the
 raw configured string. `_select_acp_mode()` (`:997-1029`) matches it against
 `_acp_mode_ids(session)` exactly (`:1011`) then case-insensitively (`:1013`);
 on no match it logs and **returns without sending `session/set_mode` at all**
@@ -176,12 +176,12 @@ tuple of names, and `_build_server()` resolves each one against
 is therefore unreachable *and unnameable* — adding the name changes nothing,
 because the lookup misses and the loop `continue`s.
 
-The memory-provider half of this landed in `84eef60d2a`
+The memory-provider half of this landed in `40dd169958`
 (`_memory_provider_bridge()`, see [changes.md](changes.md)). What remains is
 every other ABC that follows the same declare-your-own-tools pattern:
 
 - context engines — `agent/context_engine.py:413` `get_tool_schemas()` /
-  `:421` `handle_tool_call()`, routed in-agent at `agent/tool_executor.py:2435`
+  `:421` `handle_tool_call()`, routed in-agent at `agent/tool_executor.py:2428`
 - the context compressor — same shape, `agent/agent_init.py:2914`
 
 Neither is bridged. A native ACP or codex session with a context engine

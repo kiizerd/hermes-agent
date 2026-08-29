@@ -139,7 +139,7 @@ and `apps/desktop/src/app/chat/composer/bridge-mode-pill.test.tsx`.
 
 `config.yaml`'s `mcp_servers:` entries are translated to ACP shape and passed at
 `session/new`, alongside the built-in `hermes-tools` bridge. Translation is
-`_acp_mcp_server_entry()` (`copilot_acp_client.py:868`); gathering and filtering
+`_acp_mcp_server_entry()` (`copilot_acp_client.py:871`); gathering and filtering
 is `_config_mcp_servers()` (`:2155`).
 
 Rules, each pinned by a test in `tests/agent/test_copilot_acp_client.py`:
@@ -175,7 +175,7 @@ loosen.
 
 ## Client API
 
-`CopilotACPClient` (`agent/copilot_acp_client.py:1316`). The methods other parts
+`CopilotACPClient` (`agent/copilot_acp_client.py:1319`). The methods other parts
 of the app are allowed to call:
 
 | Method | Line | Contract |
@@ -207,7 +207,7 @@ that asymmetry is what made the bug hard to see, and why it read as "ACP never
 updates skills" rather than as a counter problem.
 
 `_credit_native_tool_iterations()` supplies the difference from
-`_last_turn_tool_calls`, the same compensation `agent/codex_runtime.py:891`
+`_last_turn_tool_calls`, the same compensation `agent/codex_runtime.py:895`
 applies for the codex app-server path. Three guards, each load-bearing:
 
 | Guard | Why |
@@ -218,7 +218,7 @@ applies for the codex app-server path. Three guards, each load-bearing:
 
 Codex needs no `valid_tool_names` guard at its credit site because it bypasses
 the loop entirely and applies that test at the *nudge check*
-(`codex_runtime.py:904`) instead. Same invariant, two correct placements —
+(`codex_runtime.py:908`) instead. Same invariant, two correct placements —
 copying codex verbatim here would be wrong.
 
 ## Gateway RPC

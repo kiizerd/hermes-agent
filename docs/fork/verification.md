@@ -132,7 +132,9 @@ python -m pytest tests/acp/ \
   tests/tui_gateway/test_acp_system_prompt_mode_latch.py \
   tests/hermes_cli/test_api_key_providers.py \
   tests/hermes_cli/test_model_validation.py \
-  tests/hermes_cli/test_setup_model_provider.py -q
+  tests/hermes_cli/test_setup_model_provider.py \
+  tests/hermes_cli/test_config_known_good.py \
+  tests/hermes_cli/test_config.py -q
 
 cd apps/desktop && npx vitest run && npx tsc --noEmit
 ```
@@ -297,6 +299,13 @@ Confirmed identical on a clean `upstream/main` worktree:
   `tests/tools/test_approval.py::TestDetectDangerousRm` (that pair reads as
   `rm`-detection failures, which is misleading — the symlink call is in the
   fixture, not the assertion).
+- `tests/hermes_cli/test_config.py::TestGetHermesHome::test_default_path` —
+  asserts `get_hermes_home()` returns `Path.home() / ".hermes"` with
+  `HERMES_HOME` unset, but the Windows platform default is
+  `AppData/Local/hermes` (`hermes_constants._get_platform_default_hermes_home`).
+  An unmarked host-dependent test — it would need `@pytest.mark.linux_only` plus
+  a `windows_only` sibling to be correct. Confirmed identical with the fork's
+  `hermes_cli/config.py` patch stashed, 2026-08-27. Upstream-bound.
 - Desktop vitest: ~19 failures across `electron/ssh-*`, `desktop-installation`,
   `git-worktree-ops`, `windows-hermes-path`, `stage-native-deps`,
   `markdown-text`. All Windows-path shaped, e.g. a test asserting

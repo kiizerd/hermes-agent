@@ -18,6 +18,13 @@ its own permission model, and its own session lifecycle. The fork makes
 permission RPCs routed to Hermes' approval gate, persistent sessions, streaming,
 and Hermes' own tool surface handed back to the agent over MCP.
 
+That is what the fork is *mostly* for. A small number of patches are unrelated
+to ACP — local fixes to core behavior that upstream would take but hasn't yet.
+They live in this same knowledge base, under their own headings, because the
+thing that matters about them is identical: each one makes an upstream file a
+rebase surface. Today that is the config last-known-good tier in
+[`surfaces.md`](surfaces.md).
+
 ## Read these in order
 
 | Doc | What it answers |

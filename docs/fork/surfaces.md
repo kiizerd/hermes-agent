@@ -329,7 +329,7 @@ policy/config file must not silently replace the effective policy with an empty
 one.
 
 Upstream keeps a last-known-good config in `_LAST_EXPANDED_CONFIG_BY_PATH`
-(`hermes_cli/config.py:417`), a module global read at `:3895`. That covers a
+(`hermes_cli/config.py:485`), a module global read at `:4070`. That covers a
 running process whose user mid-edits `config.yaml` into broken YAML. It does
 nothing for the case that actually bit: corruption while **nothing was running**.
 Every process afterwards starts with an empty dict, falls to `DEFAULT_CONFIG`,
@@ -357,10 +357,10 @@ User-visible files, next to `config.yaml` in the active `HERMES_HOME`:
 
 | File | Written by | Meaning |
 |---|---|---|
-| `config.yaml.lkg.1` … `.3` | `_snapshot_known_good` (`:128`) | Byte copies of configs that provably parsed. `1` is newest; `_LKG_GENERATIONS` (`:115`) caps the ring |
-| `config.yaml.corrupt.<ts>.bak` | `_backup_corrupt_config` (`:47`) | Upstream. Preserves the broken file as evidence |
+| `config.yaml.lkg.1` … `.3` | `_snapshot_known_good` (`:129`) | Byte copies of configs that provably parsed. `1` is newest; `_LKG_GENERATIONS` (`:116`) caps the ring |
+| `config.yaml.corrupt.<ts>.bak` | `_backup_corrupt_config` (`:48`) | Upstream. Preserves the broken file as evidence |
 
-Naming goes through `_lkg_path()` (`:123`) on both sides — nothing else in the
+Naming goes through `_lkg_path()` (`:124`) on both sides — nothing else in the
 tree spells the suffix out.
 
 ### Invariants
@@ -377,22 +377,22 @@ tree spells the suffix out.
   restores *in memory* only.
 - **A generation that no longer parses is skipped, not deleted.** It may still
   hold settings worth hand-recovering.
-- **A restored generation re-enters the normal pipeline** (`:3940`) rather than
+- **A restored generation re-enters the normal pipeline** (`:4115`) rather than
   short-circuiting — same `max_turns` migration, `_deep_merge`, normalize,
   expand, and managed-scope overlay the live file would have got. A
   short-circuiting restore produces a subtly different config than the one that
   was saved.
 - **A restored config is never snapshotted back**, guarded by `parsed_live_file`
-  (`:3981`). Without it, every load against a still-broken `config.yaml` would
+  (`:4156`). Without it, every load against a still-broken `config.yaml` would
   rotate the restored generation into slot 1 and walk real history off the ring.
-- **A missing `config.yaml` must not register in the in-process tier** (`:3975`).
+- **A missing `config.yaml` must not register in the in-process tier** (`:4150`).
   Upstream wrote that dict on every successful load, including loads where the
   file did not exist and the "loaded config" is just `DEFAULT_CONFIG`. The read
   side only checks whether a value is *present*, so that defaults snapshot
   outranked the disk tier and served defaults anyway — any process touching
   config before the file exists (first run, import-time load, profile creation)
   poisoned the tier for its whole lifetime.
-- **A restore is never silent.** `_warn_config_parse_failure` (`:221`) gained a
+- **A restore is never silent.** `_warn_config_parse_failure` (`:283`) gained a
   third `fallback` wording, `known-good-file`, which names the generation and its
   save time on stderr. Running for weeks on a stale snapshot unaware is its own
   failure mode.
@@ -403,7 +403,7 @@ tree spells the suffix out.
 ### CLI surface
 
 `hermes config edit` validates on editor exit and reports the safety net
-(`_report_config_edit_result`, `:5110`). Three outcomes:
+(`_report_config_edit_result`, `:5285`). Three outcomes:
 
 | Outcome | Printed |
 |---|---|
@@ -415,7 +415,7 @@ That third arm is the point of validating here at all: a broken save is
 otherwise invisible until the *next* process start, where it presents as lost
 settings rather than as a syntax error.
 
-`describe_known_good()` (`:202`) is the shared listing helper — newest first, one
+`describe_known_good()` (`:264`) is the shared listing helper — newest first, one
 line per generation with size and save time.
 
 ### Rebase surface
@@ -423,7 +423,7 @@ line per generation with size and save time.
 **`hermes_cli/config.py` carried zero fork commits before this.** It is now a
 patched file, and a heavily-trafficked upstream one. The patch is deliberately
 shaped to survive rebases: the helpers are a contiguous block near the top
-(`:101`–`:218`), and the loader changes are three small edits at the tail of
+(`:101`–`:281`), and the loader changes are three small edits at the tail of
 `_load_config_impl` rather than a restructure. Nothing is inserted into upstream
 control flow that upstream is likely to rewrite.
 
@@ -434,3 +434,9 @@ Pinned by `tests/hermes_cli/test_config_known_good.py`. The write-half tests gat
 themselves on whether `_snapshot_known_good` still has its stub body, by calling
 it and catching `NotImplementedError` — they start running for real the moment a
 body lands, with no marker to remember to remove.
+
+The body has landed, so that gate is now open and all 24 tests execute. Keep the
+gate anyway: it costs one probe call at collection time and is the thing that
+will catch a rebase that reverts the helper block back to upstream's version —
+the write half would go quiet instead of going red, which is the failure this
+shape was chosen to make impossible.

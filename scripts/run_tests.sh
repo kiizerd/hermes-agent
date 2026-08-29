@@ -112,12 +112,17 @@ fi
 # `env -i` forwards HOME, which is enough on POSIX. Native Windows CPython
 # resolves Path.home() from USERPROFILE (or HOMEDRIVE+HOMEPATH), stdlib
 # platform paths come from LOCALAPPDATA/APPDATA, ssl/sockets need SYSTEMROOT,
-# and tempfile needs TEMP/TMP. Dropping them breaks collection on native
-# Windows (issues #67385, #70813). These are location variables, not
-# credentials, so forwarding them keeps the isolation intent intact. Each is
-# only forwarded when actually set, so POSIX runs are byte-for-byte unchanged.
+# and tempfile needs TEMP/TMP. SYSTEMDRIVE is needed because Windows stores
+# the ProgramData path in the registry as a REG_EXPAND_SZ literal
+# `%SystemDrive%\ProgramData`; without SYSTEMDRIVE the expansion silently
+# fails and the unexpanded, drive-less string is created relative to the
+# current directory (a `%SystemDrive%/` junk tree in the repo root).
+# Dropping them breaks collection on native Windows (issues #67385, #70813).
+# These are location variables, not credentials, so forwarding them keeps the
+# isolation intent intact. Each is only forwarded when actually set, so POSIX
+# runs are byte-for-byte unchanged.
 WIN_ENV=()
-for _win_var in USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMROOT TEMP TMP; do
+for _win_var in USERPROFILE HOMEDRIVE HOMEPATH LOCALAPPDATA APPDATA SYSTEMDRIVE SYSTEMROOT TEMP TMP; do
   if [ -n "${!_win_var:-}" ]; then
     WIN_ENV+=("$_win_var=${!_win_var}")
   fi

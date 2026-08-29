@@ -111,8 +111,193 @@ def _backup_corrupt_config(config_path: Path) -> Optional[Path]:
         return None
 
 
+# --- Last-known-good generations (fork patch) ------------------------------
+# Completes the codex#31188 port that _load_config_impl only half-implements:
+# the in-process _LAST_EXPANDED_CONFIG_BY_PATH dict dies with the process, so a
+# corruption written while nothing was running (an MCP edit, a crashed writer)
+# leaves the NEXT fresh process with nothing but DEFAULT_CONFIG. These snapshots
+# give that fresh process a disk tier to fall back to.
+#
+# Invariants:
+#   * BYTE COPIES, never re-serialized dicts. Two reasons. (1) The in-memory
+#     config at snapshot time is *expanded* — ${OPENAI_API_KEY} already resolved
+#     to the literal secret — so dumping it would write every .env key into a
+#     plaintext file. (2) Re-serializing is what mangled the original file.
+#   * Newest is generation 1. Higher number = older.
+#   * Written only after a parse has been PROVEN good, never speculatively.
+_LKG_GENERATIONS = 3
+_LKG_SUFFIX = "lkg"
+
+# path_key -> (mtime_ns, size) of the config we last snapshotted. Skips the
+# copy when nothing changed since, so a hot load path doesn't churn the disk.
+_LKG_SNAPSHOT_SIG: Dict[str, Tuple[int, int]] = {}
+
+
+def _lkg_path(config_path: Path, generation: int) -> Path:
+    """Path of a last-known-good generation. ``1`` is the newest."""
+    return config_path.with_name(f"{config_path.name}.{_LKG_SUFFIX}.{generation}")
+
+
+def _snapshot_known_good(
+    config_path: Path, user_sig: Tuple[int, int], path_key: str
+) -> Optional[str]:
+    """Rotate a byte-copy of a ``config.yaml`` we just proved parses.
+
+    Called ONLY on the success path of ``_load_config_impl`` (and explicitly by
+    ``edit_config`` after the editor exits, so the user gets immediate
+    feedback). ``user_sig`` is the ``(st_mtime_ns, st_size)`` already computed
+    by the caller.
+
+    Rotation shifts generations down — 2 becomes 3, 1 becomes 2, the live file
+    becomes 1 — and the oldest falls off the end. ``_LKG_GENERATIONS`` caps how
+    many are kept.
+
+    Returns a short human-readable description of the shift for the caller to
+    print (e.g. ``"config.yaml.lkg.1 (new) <- .2 <- .3  (oldest dropped)"``),
+    or ``None`` when no rotation happened. Best-effort like
+    ``_backup_corrupt_config``: any OSError is swallowed, because a snapshot
+    problem must never block a config load.
+
+    Two retention decisions, both resolved toward "a generation is a *distinct
+    config*, not a write event":
+
+    * DEDUP IS BY CONTENT, not by signature alone. ``atomic_yaml_write``
+      replaces the file, so ``hermes config set``, the setup wizard and
+      ``migrate_config`` all produce a fresh ``user_sig`` even for
+      byte-identical content. ``_LKG_SNAPSHOT_SIG`` only dedups *within* one
+      process, and every ``hermes`` subcommand is a fresh process starting with
+      an empty cache — so without a content compare, three CLI invocations in a
+      row would flush the whole ring with three copies of the current file,
+      destroying exactly the history this tier exists to hold. The cost is one
+      read of generation 1 per changed signature. ``edit_config`` already
+      assumes this reading ("No content change; generations unchanged").
+    * THE PARSE IS RE-PROVEN BEFORE THE COPY. ``user_sig`` was stat'd *before*
+      the file was opened and parsed, and ``_CONFIG_LOCK`` is process-local —
+      it does not stop a concurrent ``hermes config set``, an MCP edit, or the
+      crashed writer this tier is built to survive. A mid-flight replacement
+      would otherwise land unverified bytes in generation 1 stamped with the
+      stale signature, and the dedup cache would then treat that bad
+      generation as already-snapshotted forever. So the bytes are read first
+      and the stat re-checked *after* the read: matching ``user_sig`` proves
+      the bytes in hand are the bytes that parsed. A mismatch skips the
+      snapshot **without** stamping the cache, so the next load retries. Same
+      shape as the updater's pre-swap dirty-tree re-check.
+    """
+    if _LKG_SNAPSHOT_SIG.get(path_key) == user_sig:
+        return None
+
+    newest = _lkg_path(config_path, 1)
+    try:
+        with open(config_path, "rb") as f:
+            payload = f.read()
+
+        # Re-prove the parse: if the file still carries the signature the
+        # caller parsed under, `payload` is that same content.
+        st = config_path.stat()
+        if (st.st_mtime_ns, st.st_size) != user_sig:
+            return None
+
+        try:
+            if newest.read_bytes() == payload:
+                # Same config, new inode. Nothing to rotate; stamp the cache so
+                # this process stops re-reading generation 1 on every load.
+                _LKG_SNAPSHOT_SIG[path_key] = user_sig
+                return None
+        except OSError:
+            pass  # no generation 1 yet, or unreadable — fall through and write
+
+        dropped = _lkg_path(config_path, _LKG_GENERATIONS).is_file()
+        for generation in range(_LKG_GENERATIONS - 1, 0, -1):
+            source = _lkg_path(config_path, generation)
+            if source.is_file():
+                os.replace(source, _lkg_path(config_path, generation + 1))
+
+        # Write via a sibling temp + os.replace so a crash mid-write can never
+        # leave a truncated generation 1 — a torn snapshot would parse as a
+        # valid-but-wrong config, which is worse than having no snapshot.
+        tmp_path = config_path.with_name(f"{newest.name}.tmp")
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, newest)
+        except OSError:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+    except OSError:
+        return None
+
+    _LKG_SNAPSHOT_SIG[path_key] = user_sig
+
+    present = [
+        _lkg_path(config_path, generation).name
+        for generation in range(1, _LKG_GENERATIONS + 1)
+        if _lkg_path(config_path, generation).is_file()
+    ]
+    shift = f"{present[0]} (new)"
+    if len(present) > 1:
+        shift += " <- " + " <- ".join(
+            "." + name.rsplit(".", 1)[-1] for name in present[1:]
+        )
+    if dropped:
+        shift += "  (oldest dropped)"
+    return shift
+
+
+def _load_known_good(config_path: Path) -> Optional[Tuple[Dict[str, Any], Path]]:
+    """Return the newest last-known-good generation that still parses.
+
+    Walks generations oldest-last (1, 2, 3) and returns the first that loads
+    cleanly, paired with the path it came from so the caller can name it in the
+    warning. ``None`` when no generation exists or every one is unreadable.
+
+    A generation that fails to parse is NOT deleted — same posture as
+    ``_backup_corrupt_config``: hermes preserves evidence and never silently
+    destroys a file the user might want.
+    """
+    for generation in range(1, _LKG_GENERATIONS + 1):
+        candidate = _lkg_path(config_path, generation)
+        try:
+            if not candidate.is_file():
+                continue
+            with open(candidate, encoding="utf-8") as f:
+                loaded = fast_safe_load(f) or {}
+        except Exception:
+            continue
+        if isinstance(loaded, dict):
+            return loaded, candidate
+    return None
+
+
+def describe_known_good(config_path: Optional[Path] = None) -> List[str]:
+    """Human-readable one-line-per-generation summary, newest first.
+
+    Used by ``edit_config`` to report the state of the safety net after an
+    edit. Empty list when no generations exist yet.
+    """
+    path = config_path or get_config_path()
+    lines: List[str] = []
+    for generation in range(1, _LKG_GENERATIONS + 1):
+        candidate = _lkg_path(path, generation)
+        try:
+            st = candidate.stat()
+        except OSError:
+            continue
+        saved = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime))
+        lines.append(f"  {candidate.name}  {st.st_size:>6,} bytes  saved {saved}")
+    return lines
+
+
 def _warn_config_parse_failure(
-    config_path: Path, exc: Exception, *, fallback: str = "defaults"
+    config_path: Path,
+    exc: Exception,
+    *,
+    fallback: str = "defaults",
+    source: Optional[Path] = None,
 ) -> None:
     """Surface a config.yaml parse failure to user, log, and stderr.
 
@@ -132,9 +317,10 @@ def _warn_config_parse_failure(
     ``hermes config set``.
 
     ``fallback`` selects the message wording: ``"defaults"`` (fresh process,
-    nothing else to serve) or ``"last-known-good"`` (in-process retention of
+    nothing else to serve), ``"last-known-good"`` (in-process retention of
     the previously loaded config — see the codex#31188 port in
-    ``_load_config_impl``).
+    ``_load_config_impl``), or ``"known-good-file"`` (restored from an on-disk
+    ``config.yaml.lkg.N`` generation, in which case pass ``source``).
     """
     try:
         st = config_path.stat()
@@ -163,6 +349,24 @@ def _warn_config_parse_failure(
             f"Failed to parse {config_path}: {exc}. "
             f"REFUSING to write config.yaml so the existing file is preserved. "
             f"Fix the YAML (hermes config edit) and retry."
+        )
+    elif fallback == "known-good-file":
+        # Fork patch: disk-tier restore. Never silent — running for weeks on a
+        # stale snapshot without knowing is its own failure mode.
+        saved = ""
+        if source is not None:
+            try:
+                saved = time.strftime(
+                    " (saved %Y-%m-%d %H:%M:%S)", time.localtime(source.stat().st_mtime)
+                )
+            except OSError:
+                saved = ""
+        name = source.name if source is not None else "a last-known-good snapshot"
+        msg = (
+            f"Failed to parse {config_path}: {exc}. "
+            f"Restored settings from {name}{saved} — your overrides are ACTIVE, "
+            f"but config.yaml itself is still broken and any edit you make to it "
+            f"is being IGNORED until the YAML is fixed."
         )
     else:
         msg = (
@@ -4125,20 +4329,22 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 return copy.deepcopy(cached[4]) if want_deepcopy else cached[4]
 
         config = copy.deepcopy(DEFAULT_CONFIG)
+        # Fork patch: only true when we parsed the LIVE file this call. A config
+        # restored from a generation must never be snapshotted back — that would
+        # copy the broken config.yaml over a good generation.
+        parsed_live_file = False
+        # Hoisted out of the branch below: the in-process last-known-good tier
+        # keys off this, and it must stay None when config.yaml is ABSENT.
+        # Recording a DEFAULT_CONFIG snapshot for a missing file makes the
+        # in-process tier claim it has a user config when it never saw one,
+        # which then shadows the on-disk generations at restore time.
+        user_config: Optional[Dict[str, Any]] = None
 
         if user_sig is not None:
             try:
                 with open(config_path, encoding="utf-8") as f:
                     user_config = fast_safe_load(f) or {}
-
-                if "max_turns" in user_config:
-                    agent_user_config = dict(user_config.get("agent") or {})
-                    if agent_user_config.get("max_turns") is None:
-                        agent_user_config["max_turns"] = user_config["max_turns"]
-                    user_config["agent"] = agent_user_config
-                    user_config.pop("max_turns", None)
-
-                config = _deep_merge(config, user_config)
+                parsed_live_file = True
             except Exception as e:
                 # Last-known-good fallback (port of openai/codex#31188's
                 # invariant: a parse failure in a policy/config file must not
@@ -4150,14 +4356,31 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 # broken YAML would silently lose those rules on the next load.
                 # Within a running process we still have the last successfully
                 # loaded config — keep serving it until the file is fixed.
-                # Fresh processes with no last-known-good keep the existing
-                # DEFAULT_CONFIG fallback.
+                # Fresh processes with no in-process copy fall to the disk tier
+                # (fork patch) and only then to DEFAULT_CONFIG.
                 lkg = _LAST_EXPANDED_CONFIG_BY_PATH.get(path_key)
-                _warn_config_parse_failure(
-                    config_path,
-                    e,
-                    fallback="last-known-good" if lkg is not None else "defaults",
-                )
+                if lkg is None:
+                    # Fork patch: the corruption that motivated this happened
+                    # while nothing was running, so every process that came
+                    # afterwards started with an empty dict here. Generations on
+                    # disk are the only thing standing between that and a silent
+                    # reset to DEFAULT_CONFIG. Restored content is raw user YAML
+                    # (env refs unexpanded), so it falls through to the normal
+                    # merge/normalize/expand path below rather than short-
+                    # circuiting — same treatment the live file would have got.
+                    restored = _load_known_good(config_path)
+                    if restored is not None:
+                        user_config, _lkg_source = restored
+                        _warn_config_parse_failure(
+                            config_path, e,
+                            fallback="known-good-file", source=_lkg_source,
+                        )
+                    else:
+                        _warn_config_parse_failure(config_path, e, fallback="defaults")
+                else:
+                    _warn_config_parse_failure(
+                        config_path, e, fallback="last-known-good"
+                    )
                 if lkg is not None:
                     # save_config() stores the pre-expansion normalized dict
                     # (env-ref templates preserved); the load path stores the
@@ -4179,6 +4402,19 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                             lkg_copy, _empty_env,
                         )
                     return copy.deepcopy(lkg_copy) if want_deepcopy else lkg_copy
+
+            # Runs for BOTH a freshly parsed live file and a restored
+            # generation. user_config stays None only when the parse failed and
+            # no generation was usable — then config remains DEFAULT_CONFIG.
+            if user_config:
+                if "max_turns" in user_config:
+                    agent_user_config = dict(user_config.get("agent") or {})
+                    if agent_user_config.get("max_turns") is None:
+                        agent_user_config["max_turns"] = user_config["max_turns"]
+                    user_config["agent"] = agent_user_config
+                    user_config.pop("max_turns", None)
+
+                config = _deep_merge(config, user_config)
 
         normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
         expanded = _expand_env_vars(normalized)
@@ -4202,7 +4438,21 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 managed_normalized["model"] = {"default": managed_normalized["model"]}
             managed_expanded = _expand_env_vars(managed_normalized)
             expanded = _deep_merge(expanded, managed_expanded)
-        _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
+        if user_config is not None:
+            # Only a real user config (live-parsed OR restored from a
+            # generation) becomes the in-process last-known-good. See the
+            # hoist comment above — a missing config.yaml must not register
+            # DEFAULT_CONFIG here.
+            _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
+        if parsed_live_file and user_sig is not None:
+            # Fork patch: this file has now provably parsed, so it is worth
+            # keeping. Broad except (not just OSError) because a config load
+            # must survive ANY snapshot bug — including a half-written
+            # _snapshot_known_good body.
+            try:
+                _snapshot_known_good(config_path, user_sig, path_key)
+            except Exception:
+                logger.debug("last-known-good snapshot skipped", exc_info=True)
         if cache_sig is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``
             # (deepcopy=True) callers can mutate freely without affecting the
@@ -5359,6 +5609,61 @@ def edit_config():
     
     print(f"Opening {config_path} in {editor}...")
     subprocess.run([editor, str(config_path)])
+    _report_config_edit_result(config_path)
+
+
+def _report_config_edit_result(config_path: Path) -> None:
+    """Validate config.yaml after an interactive edit and report the safety net.
+
+    Fork patch. ``hermes config edit`` used to exit silently the moment the
+    editor closed, so a YAML mistake stayed invisible until the next Hermes
+    start — where it presents as "all my settings are gone" rather than as a
+    syntax error. Parsing here turns that into immediate feedback, and it is
+    also the natural place to rotate the last-known-good generations, since a
+    successful parse is exactly the proof a snapshot needs.
+    """
+    try:
+        st = config_path.stat()
+        user_sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return
+
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            fast_safe_load(f)
+    except Exception as e:
+        print()
+        print(color("✗ config.yaml does not parse — your edit was NOT saved as a", Colors.RED, Colors.BOLD))
+        print(color("  known-good generation.", Colors.RED, Colors.BOLD))
+        print(f"  {e}")
+        existing = describe_known_good(config_path)
+        if existing:
+            print()
+            print("  Previous generations are intact. Hermes will start from the")
+            print("  newest one that parses until you fix the file:")
+            for entry in existing:
+                print(color(entry, Colors.DIM))
+        else:
+            print()
+            print(color("  No known-good generation exists yet — Hermes will fall back", Colors.YELLOW))
+            print(color("  to DEFAULT_CONFIG. Fix the YAML before restarting.", Colors.YELLOW))
+        return
+
+    try:
+        shift = _snapshot_known_good(config_path, user_sig, str(config_path))
+    except Exception as e:
+        print()
+        print(color(f"✓ config.yaml parses. (snapshot skipped: {e})", Colors.YELLOW))
+        return
+
+    print()
+    if shift:
+        print(color("✓ config.yaml parses — known-good generations shifted:", Colors.GREEN))
+        print(f"  {shift}")
+    else:
+        print(color("✓ config.yaml parses. No content change; generations unchanged.", Colors.GREEN))
+    for entry in describe_known_good(config_path):
+        print(entry)
 
 
 def _cron_model_drift_axis_for_config_key(key: str) -> Optional[str]:

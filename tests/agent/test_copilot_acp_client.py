@@ -773,3 +773,38 @@ def test_acp_cwd_explicit_overrides_session(monkeypatch, tmp_path):
                 client._run_prompt("hello", timeout_seconds=1)
 
     assert captured["kwargs"]["cwd"] == str(explicit.resolve())
+
+
+def test_resolve_args_unset_falls_back_to_copilot_transport(monkeypatch):
+    """No preference expressed -> GitHub Copilot CLI's ACP transport flags."""
+    from agent.copilot_acp_client import _resolve_args
+
+    monkeypatch.delenv("HERMES_COPILOT_ACP_ARGS", raising=False)
+    assert _resolve_args() == ["--acp", "--stdio"]
+
+
+def test_resolve_args_empty_means_no_arguments(monkeypatch):
+    """Set-but-empty is an explicit 'pass nothing', not 'no preference'.
+
+    claude-agent-acp is launched via a wrapper script that takes no
+    flags. Collapsing empty into the unset fallback sends it --acp,
+    which _acp_supported() then probes and hard-fails on.
+    """
+    from agent.copilot_acp_client import _resolve_args
+
+    monkeypatch.setenv("HERMES_COPILOT_ACP_ARGS", "")
+    assert _resolve_args() == []
+
+    monkeypatch.setenv("HERMES_COPILOT_ACP_ARGS", "   ")
+    assert _resolve_args() == []
+
+
+def test_resolve_args_empty_skips_acp_probe(monkeypatch):
+    """The empty case must not reach the --acp support probe at all."""
+    from agent.copilot_acp_client import _acp_supported, _resolve_args
+
+    monkeypatch.setenv("HERMES_COPILOT_ACP_ARGS", "")
+    args = _resolve_args()
+    assert "--acp" not in args
+    # No --acp in args -> probe short-circuits True without spawning --help.
+    assert _acp_supported("/nonexistent/binary", args) is True

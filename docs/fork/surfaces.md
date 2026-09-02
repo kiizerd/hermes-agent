@@ -165,7 +165,7 @@ loosen.
 | Var | Effect |
 |---|---|
 | `HERMES_COPILOT_ACP_COMMAND` | The subprocess to run. Setting it to `claude-agent-acp` is what makes `copilot-acp` "Claude" on this machine. Also the truth test behind `_copilot_acp_is_rerouted()` |
-| `HERMES_COPILOT_ACP_ARGS` | Extra args for that subprocess |
+| `HERMES_COPILOT_ACP_ARGS` | Extra args for that subprocess. Unset falls back to Copilot's `--acp --stdio`; **set-but-empty means "pass no arguments"**, which is the shape a launcher-script command needs |
 | `HERMES_ACP_TOOL_MODE` | Force `native` or `bridge` instead of letting `_resolve_tool_mode()` decide |
 | `HERMES_ACP_PERSISTENT_SESSION` | Turn persistent sessions off |
 | `HERMES_ACP_PERMISSION_MODE` | Pin the permission mode. Wins over config *and* the UI; surfaces to the desktop as `locked: true` |

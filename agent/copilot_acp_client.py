@@ -82,9 +82,18 @@ def _resolve_command() -> str:
 
 
 def _resolve_args() -> list[str]:
-    raw = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    if not raw:
+    # An *unset* variable means "no preference" -> GitHub Copilot CLI
+    # transport flags. A variable that is set but empty is an explicit
+    # "pass no arguments", which is the shape claude-agent-acp needs when
+    # the launcher script is itself the command. Collapsing the two sends
+    # --acp to a CLI that does not take it, and _acp_supported() then
+    # hard-fails on a --help that exits 0 with empty stdout.
+    raw = os.getenv("HERMES_COPILOT_ACP_ARGS")
+    if raw is None:
         return ["--acp", "--stdio"]
+    raw = raw.strip()
+    if not raw:
+        return []
     return shlex.split(raw)
 
 

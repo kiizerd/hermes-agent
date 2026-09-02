@@ -894,6 +894,38 @@ short enough to read. Same class as the gap the allowlist comment already cites
 location variable, not a credential, and is forwarded only when set, so POSIX
 runs are byte-for-byte unchanged.
 
+### `4beb98473a` — treat an empty `HERMES_COPILOT_ACP_ARGS` as "no arguments"
+
+3 files, +47 / −3. Upstream-owned, upstreamable.
+
+`_resolve_args()` (`agent/copilot_acp_client.py:84`) read the variable as
+`os.getenv(name, "").strip()` and returned Copilot's `["--acp", "--stdio"]` for
+any falsy result. That collapses *unset* (no preference — Copilot's flags are
+the right default) with *set-but-empty* (an explicit "pass no arguments"). The
+second was unexpressible.
+
+Set-but-empty is what `claude-agent-acp` needs on POSIX, where the launcher
+script is itself the command rather than an argument to a node binary. Windows
+never hit this: its `.env` sets `ARGS` to the `.js` path, which is non-empty and
+contains no `--acp`, so `_acp_supported()` short-circuits `True` at line 123 and
+never probes.
+
+The failure mode is not a clean "unknown option". `_acp_supported()` sees
+`--acp` among the args it is about to pass, probes the command with `--help`,
+and `claude-acp-run.sh --help` exits **0 with empty stdout**. `rc == 0` reads as
+a trustworthy answer and the absent `--acp` reads as definitively unsupported,
+so the probe returns `False` and the spawn hard-fails before a child exists. A
+*crashing* probe would have returned `None` and fallen through to the real spawn
+path — clean success with no output is what makes it fatal.
+
+Found on paladin, where both profiles carried the latent bug; only steward
+exercised it, because the default profile's cron jobs are `no-agent` and never
+call a model. Three regression tests pin unset, set-but-empty, and that the
+empty case never reaches the probe.
+
+Unset still yields `["--acp", "--stdio"]`, so nothing relying on the default
+changes.
+
 ## File map
 
 Where the fork touches upstream code, and what to check after a rebase.

@@ -504,7 +504,11 @@ def test_run_prompt_receives_picker_model():
     client = CopilotACPClient(acp_cwd="/tmp")
     seen = {}
 
-    def fake_run_prompt(prompt_text, *, timeout_seconds, model=None):
+    # ``emit`` is the fork's streaming callback: _run_turn passes it on every
+    # call so _stream_native_turn can publish chunks as they arrive. Accept it
+    # here or the stub raises TypeError before the assertion is reached — the
+    # claim under test (model passthrough) is unchanged.
+    def fake_run_prompt(prompt_text, *, timeout_seconds, model=None, emit=None):
         seen["model"] = model
         return "ok", ""
 

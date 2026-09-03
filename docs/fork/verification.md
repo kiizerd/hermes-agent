@@ -306,22 +306,34 @@ Confirmed identical on a clean `upstream/main` worktree:
   An unmarked host-dependent test — it would need `@pytest.mark.linux_only` plus
   a `windows_only` sibling to be correct. Confirmed identical with the fork's
   `hermes_cli/config.py` patch stashed, 2026-08-27. Upstream-bound.
-- Desktop vitest (`--project electron`): **34 failures across 9 files**, recounted
-  2026-08-28 after the 243-commit rebase. `electron/ssh-connection` (11),
+- Desktop vitest (`--project electron`): **33 failures across 8 files**, recounted
+  2026-09-02 after the 1,428-commit rebase. `electron/ssh-connection` (11),
   `electron/hardening` (8), `electron/git-repo-scan` (5),
   `electron/managed-ssh-update` (3), `electron/ssh-config` (3),
-  `electron/desktop-installation` (1), `electron/git-worktree-ops` (1),
-  `electron/windows-hermes-path` (1), `scripts/stage-native-deps` (1).
+  `electron/desktop-installation` (1), `electron/windows-hermes-path` (1),
+  `scripts/stage-native-deps` (1).
   All POSIX-semantics-on-Windows: `chmod`/owner-only mode bits, unix control
   sockets, `symlink_to`, darwin media-library paths, the Swift helper binary —
   e.g. a test asserting `/\/[0-9a-f]{16}\.sock$/` against
   `\tmp\d\7d8fab2028b2913f.sock`.
-  The previous entry read "~19 across 6 groups"; `hardening` and `git-repo-scan`
-  are new upstream arrivals in this jump and `markdown-text` has stopped failing.
+  Recount history: "~19 across 6 groups" → 34/9 on 2026-08-28 (`hardening` and
+  `git-repo-scan` arrived upstream, `markdown-text` stopped failing) → 33/8 here
+  (`electron/git-worktree-ops` stopped failing). Recount every rebase; the count
+  only ever moves by an upstream arrival or an upstream fix.
   Attribution is a proof, not a comparison: `git diff upstream/main -- \
   apps/desktop/electron apps/desktop/scripts` is **empty**, so every failing file
   and every source it imports is byte-identical to upstream. The fork owns none
   of it.
+- **Three `src/` suites flake under whole-suite load — do not add them to the
+  catalogue.** A bare `npx vitest run` reports 33/8; the same run under
+  `--reporter=json --outputFile=…` reported **42 failures across 11 files**, the
+  extra nine being `src/app/messaging/index.test.tsx` (7),
+  `src/app/settings/gateway-settings.test.tsx` (1) and
+  `src/store/session-unread-tile.test.ts` (1). Re-run those three files alone and
+  all 12 tests pass in 8s. They are jsdom/timing-sensitive under a loaded runner,
+  upstream-owned (zero fork diff), and not a regression. Read the count off a
+  plain run; use the JSON reporter only for per-file attribution, and re-run any
+  file it adds before believing it.
 
 Before blaming a new failure on a local change, reproduce it clean:
 `git worktree add "$TEMP/hermes_base" upstream/main`. When the failing subtree

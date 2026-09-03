@@ -1,7 +1,7 @@
 # Change ledger
 
 Every commit the fork carries on top of `upstream/main`, oldest first. Net diff
-against the merge base: **98 files, +15,563 / −480**.
+against the merge base: **98 files, +15,580 / −481**.
 
 Last verified against `upstream/main` at `ac6c8028e00` (2026-08-28). When you
 rebase, re-run the numbers below and re-check the `file.py:line` refs in

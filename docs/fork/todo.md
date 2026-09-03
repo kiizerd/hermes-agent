@@ -176,7 +176,7 @@ tuple of names, and `_build_server()` resolves each one against
 is therefore unreachable *and unnameable* — adding the name changes nothing,
 because the lookup misses and the loop `continue`s.
 
-The memory-provider half of this landed in `40dd169958`
+The memory-provider half of this landed in `2bcf018654`
 (`_memory_provider_bridge()`, see [changes.md](changes.md)). What remains is
 every other ABC that follows the same declare-your-own-tools pattern:
 

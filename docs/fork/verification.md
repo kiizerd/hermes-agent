@@ -7,7 +7,7 @@ bundle — an edit is not evidence.
 
 ## Memory-provider MCP bridge — what is proven, and what is not
 
-`40dd169958` was verified module-probe style, but against the **real** hindsight
+`2bcf018654` was verified module-probe style, but against the **real** hindsight
 service rather than a stub: import the edited
 `agent/transports/hermes_tools_mcp_server`, call `_memory_provider_bridge()`,
 build a real `MCPServer`, and drive `hindsight_recall` / `hindsight_retain`

@@ -86,6 +86,7 @@ re-applied by hand on a fresh fork.
 | Setting | Value | Why |
 |---|---|---|
 | Workflow `auto-fix lint issues & formatting` (`js-autofix.yml`) | `disabled_manually` | The privileged `apply-patch` job needs a GitHub App (`vars.APP_CLIENT_ID` / `secrets.APP_PRIVATE_KEY`). The fork has neither, so it falls back to `GITHUB_TOKEN`, which GitHub blocks from opening PRs: `GitHub Actions is not permitted to create or approve pull requests`. The job produced a real patch, pushed `bot/js-autofix`, then died every push. Replacement: run `npm run fix` locally before pushing. |
+| Workflow `Install & Update E2E` (`install-e2e.yml`) | `disabled_manually` | Not a fork defect — **upstream is red on this too**, every scheduled run, on the same legs (verified 2026-08-29 across `NousResearch/hermes-agent` runs 32943385209…33240831798). The `installer` route fails at `scripts/install.sh`'s `npm install` inside `scripts/dev-sandbox.sh`; npm exits non-zero in ~1s with an empty captured log, so the installer's own `log_error "npm output:"` dump prints nothing. The `update` route — the one this fork actually uses — passes. `install-e2e.yml` is one of only two scheduled workflows with no `if: github.repository == 'NousResearch/hermes-agent'` guard (`osv-scanner.yml` is the other, and it stays green), so the fork inherited a 12h cron that mailed a failure twice a day for a bug it cannot fix. Re-check upstream's runs before re-enabling. |
 
 Re-enable with `gh workflow enable "<name>" --repo kiizerd/hermes-agent`;
 audit with `gh workflow list --all --repo kiizerd/hermes-agent`.
